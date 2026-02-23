@@ -27,6 +27,33 @@ LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "").strip()
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
+# MusicBrainz Picard-standard TXXX field names
+MB_TXXX_FIELDS = [
+    "musicbrainz_trackid",
+    "musicbrainz_albumid",
+    "musicbrainz_releasegroupid",
+    "musicbrainz_artistid",
+    "musicbrainz_albumartistid",
+    "musicbrainz_releasetrackid",
+    "musicbrainz_workid",
+    "musicbrainz_trmid",
+    "musicbrainz_discid",
+    "musicbrainz_releasecountry",
+    "musicbrainz_releasestatus",
+    "musicbrainz_releasetype",
+    "musicbrainz_albumtype",
+    "musicbrainz_albumstatus",
+    "musicbrainz_albumartist",
+    "musicbrainz_artist",
+    "musicbrainz_album",
+    "barcode",
+    "asin",
+]
+
+# Lightweight tag cache: (path, mtime) -> dict (max 2000 entries)
+_tag_cache: dict = {}
+_TAG_CACHE_MAX = 2000
+
 app = Flask(__name__)
 
 # ---------------- Auth ----------------
@@ -143,6 +170,34 @@ def http_get(url: str, **kwargs):
     headers.setdefault("User-Agent", UA)
     return requests.get(url, headers=headers, **kwargs)
 
+def quick_tags(path: str) -> dict:
+    """Lightweight metadata extraction cached by (path, mtime)."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    key = (path, mtime)
+    if key in _tag_cache:
+        return _tag_cache[key]
+    result = {}
+    try:
+        tags = ID3(path)
+        result = {
+            "artist": get_text(tags, "TPE1"),
+            "title": get_text(tags, "TIT2"),
+            "date": get_text(tags, "TDRC") or extract_year(tags),
+            "genre": get_text(tags, "TCON"),
+            "has_art": bool(tags.getall("APIC")),
+        }
+    except Exception:
+        result = {"artist": "", "title": "", "date": "", "genre": "", "has_art": False}
+    _tag_cache[key] = result
+    if len(_tag_cache) > _TAG_CACHE_MAX:
+        # Evict the oldest quarter of entries
+        for old_key in list(_tag_cache)[:_TAG_CACHE_MAX // 4]:
+            _tag_cache.pop(old_key, None)
+    return result
+
 # ---------------- ID3 write/read ----------------
 def upsert_id3(mp3_path: str, fields: dict):
     try:
@@ -200,6 +255,10 @@ def upsert_id3(mp3_path: str, fields: dict):
     set_txxx(tags, "label", fields.get("label", ""))
     set_txxx(tags, "catalog_number", fields.get("catalog_number", ""))
 
+    # MusicBrainz Picard TXXX fields
+    for mb_key in MB_TXXX_FIELDS:
+        set_txxx(tags, mb_key, fields.get(mb_key, ""))
+
     art_url = (fields.get("art_url") or "").strip()
     if art_url:
         r = http_get(art_url, timeout=25)
@@ -243,6 +302,7 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "length_seconds": float(getattr(mp3.info, "length", 0.0) or 0.0),
         "bitrate_kbps": int((getattr(mp3.info, "bitrate", 0) or 0) / 1000),
         "sample_rate_hz": int(getattr(mp3.info, "sample_rate", 0) or 0),
+        **{mb_key: get_txxx(tags, mb_key) for mb_key in MB_TXXX_FIELDS},
     }
 
 # ---------------- Archive ----------------
@@ -292,7 +352,8 @@ def list_dir(dir_path: str, q: str = "", limit: int = 200):
             if e.is_dir(follow_symlinks=False):
                 entries.append({"type": "dir", "name": e.name, "path": full, "rel": rel})
             elif e.is_file(follow_symlinks=False) and e.name.lower().endswith(".mp3"):
-                entries.append({"type": "file", "name": e.name, "path": full, "rel": rel})
+                meta = quick_tags(full)
+                entries.append({"type": "file", "name": e.name, "path": full, "rel": rel, **meta})
     # dirs first, then files
     entries.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
     return entries[:limit]
@@ -311,7 +372,8 @@ def search_files(root_dir: str, q: str, limit: int = 200):
             full = os.path.join(base, fn)
             rel = os.path.relpath(full, MUSIC_ROOT)
             if q in fn.lower() or q in rel.lower():
-                results.append({"type": "file", "name": fn, "path": full, "rel": rel})
+                meta = quick_tags(full)
+                results.append({"type": "file", "name": fn, "path": full, "rel": rel, **meta})
                 if len(results) >= limit:
                     return results
     return results
@@ -349,6 +411,26 @@ def api_search():
         d = request.args.get("dir", MUSIC_ROOT)
         q = request.args.get("q", "")
         return jsonify({"dir": safe_dir(d), "results": search_files(d, q=q)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/art", methods=["GET"])
+def api_art():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        path = safe_path(request.args.get("path", ""))
+        tags = ID3(path)
+        pics = tags.getall("APIC")
+        if not pics:
+            return Response(status=404)
+        data = pics[0].data
+        im = Image.open(BytesIO(data)).convert("RGB")
+        im.thumbnail((80, 80), Image.LANCZOS)
+        out = BytesIO()
+        im.save(out, format="JPEG", quality=75)
+        return Response(out.getvalue(), mimetype="image/jpeg",
+                        headers={"Cache-Control": "max-age=3600"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -703,158 +785,291 @@ def ui_home():
     path = (request.args.get("path") or "").strip()
 
     return f"""<!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>MP3 Tag Editor</title>
   <style>
-    body{{font-family:system-ui,Segoe UI,Arial;margin:20px;max-width:1250px}}
-    input,textarea{{width:100%;padding:10px;margin:6px 0 14px 0}}
-    label{{font-weight:650}}
-    .row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
-    .btn{{padding:10px 14px;font-weight:750;margin-right:8px;margin-top:6px}}
-    .hint{{color:#555;font-size:13px;margin-top:-10px;margin-bottom:12px}}
-    .box{{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}}
-    .mono{{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}}
-    .list{{max-height:340px;overflow:auto;border:1px solid #eee;border-radius:12px;padding:10px}}
-    .item{{padding:6px 8px;border-radius:10px;display:flex;gap:10px;align-items:center}}
-    .item:hover{{background:#f6f6f6}}
-    .tag{{font-size:12px;background:#f1f1f1;border-radius:999px;padding:2px 8px}}
-    a{{text-decoration:none}}
+    :root {{
+      --accent: #3b6fd4;
+      --border: #d1d5db;
+      --bg: #f9fafb;
+      --card-bg: #ffffff;
+      --thumb-size: 44px;
+      --text: #111827;
+      --muted: #6b7280;
+      --min-bg: #fffbeb;
+      --min-border: #f59e0b;
+      --no-genre: #fff0f0;
+      --radius: 10px;
+      --shadow: 0 1px 4px rgba(0,0,0,.08);
+    }}
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{
+      font-family: system-ui, "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 16px 20px;
+      max-width: 1300px;
+    }}
+    h1 {{ font-size: 1.5rem; font-weight: 700; margin: 0 0 4px; }}
+    h2 {{ font-size: 1.1rem; font-weight: 600; margin: 0 0 10px; color: var(--accent); }}
+    h3 {{ font-size: .95rem; font-weight: 600; margin: 0 0 8px; }}
+    p.sub {{ color: var(--muted); font-size: .85rem; margin: 0 0 16px; }}
+    .card {{
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }}
+    .row2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    @media(max-width:700px){{ .row2 {{ grid-template-columns: 1fr; }} }}
+    label {{ display: block; font-size: .85rem; font-weight: 600; margin-bottom: 4px; }}
+    input[type=text], input:not([type]), textarea {{
+      width: 100%; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 6px;
+      font-size: .9rem; background: #fff; color: var(--text);
+      margin-bottom: 12px; transition: border-color .15s;
+    }}
+    input:focus, textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,111,212,.15); }}
+    textarea {{ resize: vertical; }}
+    .hint {{ color: var(--muted); font-size: .78rem; margin: -8px 0 10px; }}
+    .btn {{
+      display: inline-block; padding: 8px 14px; font-size: .85rem; font-weight: 600;
+      border: none; border-radius: 6px; background: var(--accent); color: #fff;
+      cursor: pointer; margin-right: 6px; margin-bottom: 6px; transition: opacity .15s;
+    }}
+    .btn:hover {{ opacity: .88; }}
+    .btn-sm {{ padding: 5px 10px; font-size: .8rem; }}
+    .btn-outline {{ background: transparent; border: 1px solid var(--accent); color: var(--accent); }}
+    .btn-ghost {{ background: #f3f4f6; color: var(--text); border: 1px solid var(--border); }}
+    .mono {{ font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: .82rem; }}
+    .callout-min {{
+      border: 2px solid var(--min-border); background: var(--min-bg);
+      border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+    }}
+    .callout-min .callout-title {{
+      font-size: .78rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: #b45309; margin-bottom: 12px;
+    }}
+    .file-list {{
+      max-height: 380px; overflow-y: auto;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card-bg);
+    }}
+    .file-item {{
+      display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
+      cursor: pointer; border-bottom: 1px solid #f0f0f0; transition: background .1s;
+    }}
+    .file-item:last-child {{ border-bottom: none; }}
+    .file-item:hover {{ background: #f0f4ff; }}
+    .file-item.no-genre {{ background: var(--no-genre); }}
+    .file-item.no-genre:hover {{ background: #ffe4e4; }}
+    .file-thumb {{ width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; object-fit: cover; flex-shrink: 0; }}
+    .file-thumb-placeholder {{
+      width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; background: #e5e7eb;
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 1.3rem;
+    }}
+    .file-meta {{ flex: 1; min-width: 0; }}
+    .file-name {{ font-weight: 600; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .file-path {{ font-size: .75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }}
+    .file-artist {{ font-size: .82rem; margin-top: 2px; }}
+    .file-title-tag {{ font-size: .82rem; color: var(--muted); margin-top: 1px; }}
+    .file-footer {{ display: flex; gap: 8px; margin-top: 3px; font-size: .78rem; }}
+    .genre-badge {{ background: #d1fae5; color: #065f46; border-radius: 999px; padding: 1px 7px; font-size: .75rem; font-weight: 600; }}
+    .genre-missing {{ background: #fee2e2; color: #991b1b; border-radius: 999px; padding: 1px 7px; font-size: .75rem; font-weight: 600; }}
+    .dir-item {{
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+      cursor: pointer; border-bottom: 1px solid #f0f0f0; font-size: .88rem; font-weight: 500;
+    }}
+    .dir-item:hover {{ background: #f0f4ff; }}
+    details.mb-section summary {{
+      cursor: pointer; font-size: .95rem; font-weight: 600; color: var(--accent);
+      padding: 8px 0; user-select: none; list-style: disclosure-closed;
+    }}
+    details.mb-section[open] summary {{ margin-bottom: 12px; list-style: disclosure-open; }}
+    .result-item {{ border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .section-sep {{ border: none; border-top: 1px solid var(--border); margin: 16px 0; }}
+    .field-group {{ margin-bottom: 0; }}
   </style>
 </head>
 <body>
-<h2>MP3 ID3v2 Editor</h2>
-<div class="hint">Root: <span class="mono">{MUSIC_ROOT}</span></div>
 
-<div class="row">
-  <div class="box">
-    <b>Browse</b>
-    <div class="hint">Navigate folders and click a file to edit.</div>
+<h1>&#127925; MP3 Tag Editor</h1>
+<p class="sub">Music root: <span class="mono">{MUSIC_ROOT}</span></p>
+
+<div class="row2">
+  <div class="card">
+    <h2>Browse</h2>
+    <p class="sub">Navigate folders and click a file to edit.</p>
     <label>Directory</label>
     <input id="dir" value="{MUSIC_ROOT}"/>
-    <label>Filter (optional, current dir)</label>
+    <label>Filter (optional)</label>
     <input id="dirFilter" placeholder="e.g. maribou or 2024"/>
     <button class="btn" type="button" onclick="loadDir()">Load</button>
-    <button class="btn" type="button" onclick="upDir()">Up</button>
+    <button class="btn btn-ghost" type="button" onclick="upDir()">&#8593; Up</button>
     <div id="dirErr" class="hint"></div>
-    <div class="list" id="dirList"></div>
+    <div class="file-list" id="dirList"></div>
   </div>
 
-  <div class="box">
-    <b>Search</b>
-    <div class="hint">Search recursively under a directory.</div>
+  <div class="card">
+    <h2>Search</h2>
+    <p class="sub">Search recursively under a directory.</p>
     <label>Search root</label>
     <input id="sroot" value="{MUSIC_ROOT}"/>
     <label>Query</label>
     <input id="sq" placeholder="filename or partial path"/>
     <button class="btn" type="button" onclick="doSearch()">Search</button>
     <div id="sErr" class="hint"></div>
-    <div class="list" id="sList"></div>
+    <div class="file-list" id="sList"></div>
   </div>
 </div>
 
-<div class="box">
-  <b>Edit</b>
-  <div class="hint">Single file editor. Use “Load existing tags” then tweak and write. Archive uses your structure with <span class="mono">Album [Year]</span>.</div>
+<div class="card">
+  <h2>Edit Tags</h2>
+  <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">Genre/AlbumArtist/Album [Year]/</span>.</p>
 
   <form method="POST" action="/update">
     <label>File path</label>
     <input name="path" id="path" value="{path}"/>
-
-    <button type="button" class="btn" onclick="loadTags()">Load existing tags + audio info</button>
+    <button type="button" class="btn" onclick="loadTags()">Load existing tags &amp; audio info</button>
     <div id="loadMsg" class="hint"></div>
 
-    <div class="box">
-      <b>Lookups</b>
+    <hr class="section-sep"/>
 
-      <div class="row">
+    <div class="card" style="background:var(--bg)">
+      <h3>Lookups</h3>
+      <div class="row2">
         <div>
-          <button type="button" class="btn" onclick="mbSearch()">MusicBrainz Search</button>
-          <input id="mbref" placeholder="Paste MusicBrainz URL or MBID (recording/release)"/>
-          <button type="button" class="btn" onclick="mbResolve()">Resolve MusicBrainz URL/MBID</button>
+          <button type="button" class="btn btn-outline" onclick="mbSearch()">MusicBrainz Search</button>
+          <input id="mbref" placeholder="Paste MusicBrainz URL or MBID"/>
+          <button type="button" class="btn btn-outline" onclick="mbResolve()">Resolve MB URL/MBID</button>
           <div id="mbResults"></div>
         </div>
-
         <div>
-          <button type="button" class="btn" onclick="discogsSearch()">Discogs Search (album)</button>
-          <div class="hint">Needs DISCOGS_TOKEN env. Includes tracklist picker.</div>
+          <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
+          <p class="sub">Needs DISCOGS_TOKEN env. Includes tracklist picker.</p>
           <div id="discogsResults"></div>
           <div id="discogsTracklist"></div>
         </div>
       </div>
-
-      <div class="row">
+      <div class="row2">
         <div>
           <input id="purl" placeholder="Paste URL: Beatport / Bandcamp / Juno / Traxsource"/>
-          <button type="button" class="btn" onclick="parseUrl()">Parse URL</button>
+          <button type="button" class="btn btn-outline" onclick="parseUrl()">Parse URL</button>
           <input id="bpq" placeholder="Beatport search query (optional)"/>
-          <button type="button" class="btn" onclick="beatportSearch()">Beatport Search</button>
+          <button type="button" class="btn btn-outline" onclick="beatportSearch()">Beatport Search</button>
           <div id="parseResults"></div>
         </div>
-
         <div>
-          <button type="button" class="btn" onclick="acoustid()">AcoustID Fingerprint</button>
-          <div class="hint">Needs ACOUSTID_KEY env.</div>
+          <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
+          <p class="sub">Needs ACOUSTID_KEY env.</p>
           <div id="acoustidResults"></div>
-
-          <button type="button" class="btn" onclick="lastfm()">Last.fm Genre Suggest</button>
-          <div class="hint">Needs LASTFM_API_KEY env.</div>
+          <button type="button" class="btn btn-outline" onclick="lastfm()">Last.fm Genre Suggest</button>
+          <p class="sub">Needs LASTFM_API_KEY env.</p>
           <div id="lastfmResults"></div>
         </div>
       </div>
     </div>
 
-    <div class="row">
-      <div>
-        <label>Title</label><input name="title"/>
-        <label>Artist</label><input name="artist"/>
-        <label>Album</label><input name="album"/>
-        <label>Album Artist (band)</label><input name="albumartist"/>
-        <label>Involved people list</label>
-        <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
-        <div class="hint">Stored as <span class="mono">TXXX:involved_people_list</span>.</div>
+    <hr class="section-sep"/>
+
+    <div class="callout-min">
+      <div class="callout-title">&#11088; Minimum required tags</div>
+      <div class="row2">
+        <div>
+          <div class="field-group"><label>Title</label><input name="title"/></div>
+          <div class="field-group"><label>Artist</label><input name="artist"/></div>
+          <div class="field-group"><label>Album</label><input name="album"/></div>
+          <div class="field-group"><label>Album Artist (band)</label><input name="albumartist"/></div>
+          <div class="field-group">
+            <label>Involved people list</label>
+            <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
+            <div class="hint">Stored as <span class="mono">TXXX:involved_people_list</span></div>
+          </div>
+        </div>
+        <div>
+          <div class="field-group"><label>Date</label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
+          <div class="field-group"><label>Year</label><input name="year" placeholder="YYYY"/></div>
+          <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
+          <div class="field-group"><label>Genre</label><input name="genre"/></div>
+          <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
+          <div class="field-group"><label>Publisher</label><input name="publisher"/></div>
+          <div class="field-group"><label>Comment</label><textarea name="comment" rows="3"></textarea></div>
+        </div>
       </div>
-      <div>
-        <label>Date</label><input name="date" placeholder="YYYY or YYYY-MM-DD"/>
-        <label>Year</label><input name="year" placeholder="YYYY"/>
-        <label>Original Year</label><input name="original_year" placeholder="YYYY"/>
-        <label>Genre</label><input name="genre"/>
-        <label>Track number</label><input name="track" placeholder="1 or 1/12"/>
-        <label>Publisher</label><input name="publisher"/>
-        <label>Comment</label><textarea name="comment" rows="4"></textarea>
+      <div class="row2">
+        <div>
+          <div class="field-group">
+            <label>Artist sort</label><input name="artist_sort" placeholder="Beatles, The"/>
+            <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
+            <label style="font-weight:400;font-size:.82rem"><input type="checkbox" name="auto_artist_sort" value="1" checked/> Auto-generate if blank</label>
+          </div>
+        </div>
+        <div>
+          <div class="field-group">
+            <label>Album artist sort</label><input name="albumartist_sort" placeholder="Beatles, The"/>
+            <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
+            <label style="font-weight:400;font-size:.82rem"><input type="checkbox" name="auto_albumartist_sort" value="1" checked/> Auto-generate if blank</label>
+          </div>
+        </div>
+      </div>
+      <div class="row2">
+        <div>
+          <div class="field-group">
+            <label>Label</label><input name="label" placeholder="(optional)"/>
+            <div class="hint">Stored as <span class="mono">TXXX:label</span></div>
+          </div>
+        </div>
+        <div>
+          <div class="field-group">
+            <label>Catalog number</label><input name="catalog_number" placeholder="(optional)"/>
+            <div class="hint">Stored as <span class="mono">TXXX:catalog_number</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="field-group">
+        <label>Cover art image URL</label>
+        <input name="art_url" placeholder="https://.../cover.jpg (embedded as JPEG)"/>
       </div>
     </div>
 
-    <div class="row">
-      <div>
-        <label>Artist sort</label><input name="artist_sort" placeholder="Beatles, The"/>
-        <div class="hint">Auto-generates only for names starting with “The …”.</div>
-        <label><input type="checkbox" name="auto_artist_sort" value="1" checked /> Auto-generate Artist sort if blank</label>
+    <details class="mb-section card" style="margin-bottom:16px">
+      <summary>Advanced / MusicBrainz Picard fields</summary>
+      <div class="row2">
+        <div>
+          <div class="field-group"><label>MusicBrainz Track ID</label><input name="musicbrainz_trackid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Album ID</label><input name="musicbrainz_albumid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Release Group ID</label><input name="musicbrainz_releasegroupid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Artist ID</label><input name="musicbrainz_artistid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Album Artist ID</label><input name="musicbrainz_albumartistid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Release Track ID</label><input name="musicbrainz_releasetrackid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Work ID</label><input name="musicbrainz_workid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz TRMID (legacy)</label><input name="musicbrainz_trmid" class="mono" placeholder="UUID"/></div>
+          <div class="field-group"><label>MusicBrainz Disc ID</label><input name="musicbrainz_discid" class="mono" placeholder="disc id"/></div>
+        </div>
+        <div>
+          <div class="field-group"><label>MusicBrainz Release Country</label><input name="musicbrainz_releasecountry" placeholder="e.g. GB"/></div>
+          <div class="field-group"><label>MusicBrainz Release Status</label><input name="musicbrainz_releasestatus" placeholder="Official / Promotion&hellip;"/></div>
+          <div class="field-group"><label>MusicBrainz Release Type</label><input name="musicbrainz_releasetype" placeholder="Album / Single&hellip;"/></div>
+          <div class="field-group"><label>MusicBrainz Album Type</label><input name="musicbrainz_albumtype" placeholder="Album / Single&hellip;"/></div>
+          <div class="field-group"><label>MusicBrainz Album Status</label><input name="musicbrainz_albumstatus" placeholder="Official&hellip;"/></div>
+          <div class="field-group"><label>MusicBrainz Album Artist</label><input name="musicbrainz_albumartist"/></div>
+          <div class="field-group"><label>MusicBrainz Artist</label><input name="musicbrainz_artist"/></div>
+          <div class="field-group"><label>MusicBrainz Album</label><input name="musicbrainz_album"/></div>
+          <div class="field-group"><label>Barcode</label><input name="barcode" placeholder="EAN/UPC"/></div>
+          <div class="field-group"><label>ASIN</label><input name="asin" placeholder="Amazon ASIN"/></div>
+        </div>
       </div>
-      <div>
-        <label>Album artist sort</label><input name="albumartist_sort" placeholder="Beatles, The"/>
-        <div class="hint">Auto-generates only for names starting with “The …”.</div>
-        <label><input type="checkbox" name="auto_albumartist_sort" value="1" checked /> Auto-generate Album artist sort if blank</label>
-      </div>
-    </div>
+    </details>
 
-    <div class="row">
-      <div>
-        <label>Label</label><input name="label" placeholder="(optional)"/>
-        <div class="hint">Stored as <span class="mono">TXXX:label</span></div>
-      </div>
-      <div>
-        <label>Catalog number</label><input name="catalog_number" placeholder="(optional)"/>
-        <div class="hint">Stored as <span class="mono">TXXX:catalog_number</span></div>
-      </div>
-    </div>
-
-    <label>Cover art image URL (optional)</label>
-    <input name="art_url" placeholder="https://.../cover.jpg or .png (embedded as JPEG)"/>
-
-    <button class="btn" type="submit" name="action" value="write">Write tags</button>
-    <button class="btn" type="submit" name="action" value="archive">Write tags + Archive this file</button>
+    <button class="btn" type="submit" name="action" value="write">&#128190; Write tags</button>
+    <button class="btn btn-ghost" type="submit" name="action" value="archive">&#128230; Write tags + Archive</button>
   </form>
 </div>
 
@@ -862,6 +1077,31 @@ def ui_home():
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
 function setField(name, val){{ const el = document.querySelector(`[name="${{name}}"]`); if(el) el.value = val || ""; }}
 function getField(name){{ const el = document.querySelector(`[name="${{name}}"]`); return el ? el.value : ""; }}
+
+function renderFileItem(it){{
+  const noGenre = it.type === "file" && !it.genre;
+  const genreBadge = it.type === "file"
+    ? (it.genre ? `<span class="genre-badge">${{esc(it.genre)}}</span>` : `<span class="genre-missing">no genre</span>`)
+    : "";
+  if(it.type === "dir"){{
+    return `<div class="dir-item" onclick="openDir(\'${{esc(it.path)}}\')">
+      <div class="file-thumb-placeholder">&#128193;</div><span>${{esc(it.name)}}</span>
+    </div>`;
+  }}
+  const thumb = it.has_art
+    ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>&#127925;</div>'">`
+    : `<div class="file-thumb-placeholder">&#127925;</div>`;
+  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" onclick="openFile(\'${{esc(it.path)}}\')">
+    ${{thumb}}
+    <div class="file-meta">
+      <div class="file-name">${{esc(it.name)}}</div>
+      <div class="file-path mono">${{esc(it.rel)}}</div>
+      <div class="file-artist">${{esc(it.artist||"")}}</div>
+      <div class="file-title-tag">${{esc(it.title||"")}}</div>
+      <div class="file-footer"><span style="color:var(--muted)">${{esc(it.date||"")}}</span>${{genreBadge}}</div>
+    </div>
+  </div>`;
+}}
 
 async function loadDir(){{
   const d = document.getElementById("dir").value.trim();
@@ -874,17 +1114,11 @@ async function loadDir(){{
   if(!res.ok){{ err.textContent = data.error || "Error"; box.innerHTML=""; return; }}
   err.textContent = "";
   document.getElementById("dir").value = data.dir;
-  box.innerHTML = data.items.map(it => {{
-    const icon = it.type === "dir" ? "📁" : "🎵";
-    const action = it.type === "dir"
-      ? `onclick="openDir('${{esc(it.path)}}')"`
-      : `onclick="openFile('${{esc(it.path)}}')"`
-    return `<div class="item" ${{action}}><span>${{icon}}</span><span style="flex:1">${{esc(it.name)}}</span><span class="tag mono">${{esc(it.rel)}}</span></div>`;
-  }}).join("");
+  box.innerHTML = data.items.map(renderFileItem).join("");
 }}
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
-function openFile(p){{ document.getElementById("path").value = p; window.scrollTo(0, document.body.scrollHeight); }}
+function openFile(p){{ document.getElementById("path").value = p; document.getElementById("path").scrollIntoView({{behavior:"smooth"}}); }}
 
 function upDir(){{
   const d = document.getElementById("dir").value.trim();
@@ -905,10 +1139,15 @@ async function doSearch(){{
   const data = await res.json();
   if(!res.ok){{ err.textContent = data.error || "Error"; box.innerHTML=""; return; }}
   err.textContent = `Found: ${{data.results.length}}`;
-  box.innerHTML = data.results.map(it =>
-    `<div class="item" onclick="openFile('${{esc(it.path)}}')"><span>🎵</span><span style="flex:1">${{esc(it.name)}}</span><span class="tag mono">${{esc(it.rel)}}</span></div>`
-  ).join("");
+  box.innerHTML = data.results.map(renderFileItem).join("");
 }}
+
+const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_releasegroupid",
+  "musicbrainz_artistid","musicbrainz_albumartistid","musicbrainz_releasetrackid",
+  "musicbrainz_workid","musicbrainz_trmid","musicbrainz_discid","musicbrainz_releasecountry",
+  "musicbrainz_releasestatus","musicbrainz_releasetype","musicbrainz_albumtype",
+  "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
+  "barcode","asin"];
 
 async function loadTags(){{
   const p = document.getElementById("path").value.trim();
@@ -917,11 +1156,12 @@ async function loadTags(){{
   const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
   const data = await res.json();
   if(!res.ok){{ msg.textContent = data.error || "Error"; return; }}
-
-  for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","label","catalog_number"]){{
+  for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "label","catalog_number",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  msg.textContent = `Loaded. Art: ${{data.has_art ? "Yes" : "No"}} | Length: ${{(data.length_seconds||0).toFixed(1)}}s | Bitrate: ${{data.bitrate_kbps||0}}kbps | SR: ${{data.sample_rate_hz||0}}Hz`;
+  msg.textContent = `Loaded. Art: ${{data.has_art ? "✅ Yes" : "❌ No"}} | ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
 }}
 
 async function mbSearch(){{
@@ -933,12 +1173,11 @@ async function mbSearch(){{
   if(!data.results){{ el.textContent = data.error || "No results"; return; }}
   window._mb = data.results;
   el.innerHTML = data.results.map((r,i)=>`
-    <div class="box">
-      <b>${{esc(r.title)}}</b> — ${{esc(r.artist||"")}} <span style="color:#666">${{esc(r.date||"")}}</span>
-      <button type="button" class="btn" onclick="applyMB(${{i}})">Use</button>
-      <div class="hint">MBID: <span class="mono">${{esc(r.id)}}</span></div>
-    </div>
-  `).join("");
+    <div class="result-item">
+      <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
+      <button type="button" class="btn btn-sm" onclick="applyMB(${{i}})">Use</button>
+      <div class="hint mono">MBID: ${{esc(r.id)}}</div>
+    </div>`).join("");
 }}
 function applyMB(i){{
   const r = window._mb[i]; if(!r) return;
@@ -968,13 +1207,12 @@ async function discogsSearch(){{
   if(!data.results){{ el.textContent = data.error || "No results"; return; }}
   window._dc = data.results;
   el.innerHTML = data.results.map((r,i)=>`
-    <div class="box">
-      <b>${{esc(r.title)}}</b> <span style="color:#666">${{esc(r.year||"")}}</span>
+    <div class="result-item">
+      <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
       <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
-      <button type="button" class="btn" onclick="discogsUse(${{i}})">Use + Tracklist</button>
-      ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:60px;border-radius:8px;margin-left:8px">` : ""}}
-    </div>
-  `).join("");
+      <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
+      ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle">` : ""}}
+    </div>`).join("");
 }}
 async function discogsUse(i){{
   const r = window._dc[i]; if(!r || !r.id) return;
@@ -986,20 +1224,20 @@ async function discogsUse(i){{
   if(!data.fields){{ el.textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
   el.textContent = "Applied fields from Discogs. Pick a track below (optional).";
-
   const list = data.tracklist || [];
-  tl.innerHTML = "<div class='box'><b>Discogs Tracklist (click to apply title/track)</b>" +
+  tl.innerHTML = list.length ? `<div class="result-item"><strong>Tracklist</strong><br>` +
     list.map(t => {{
       const pos = (t.position||"").trim();
-      return `<div class="item" onclick="applyTrack('${{esc(pos)}}','${{esc(t.title||"")}}')">
-        <span class="tag mono">${{esc(pos||"")}}</span><span style="flex:1">${{esc(t.title||"")}}</span><span class="hint">${{esc(t.duration||"")}}</span>
+      return `<div style="display:flex;gap:8px;padding:4px 0;cursor:pointer" onclick="applyTrack(\'${{esc(pos)}}\',${{JSON.stringify(t.title||"")}})">
+        <span class="mono" style="min-width:28px">${{esc(pos||"")}}</span>
+        <span style="flex:1">${{esc(t.title||"")}}</span>
+        <span style="color:var(--muted)">${{esc(t.duration||"")}}</span>
       </div>`;
-    }}).join("") + "</div>";
+    }}).join("") + "</div>" : "";
 }}
 function applyTrack(pos, title){{
-  // Try to extract a numeric track from position (e.g. "A1" => 1 is ambiguous; only use numeric if clean)
-  const m = (pos||"").match(/^(\\d+)$/);
-  if(m) setField("track", m[1]);
+  const m = (pos||"").match(/^\\d+$/);
+  if(m) setField("track", pos);
   setField("title", title);
 }}
 
@@ -1035,12 +1273,12 @@ async function acoustid(){{
   if(!data.results){{ el.textContent = data.error || "No results"; return; }}
   window._ac = data.results;
   el.innerHTML = data.results.map((r,i)=>`
-    <div class="box">
-      <b>${{esc(r.title||"")}}</b> — ${{esc(r.artist||"")}} <span style="color:#666">score: ${{(r.score||0).toFixed(3)}}</span>
-      <button type="button" class="btn" onclick="useAcoustID(${{i}})">Resolve via MusicBrainz</button>
-      <div class="hint">recording_id: <span class="mono">${{esc(r.recording_id||"")}}</span></div>
-    </div>
-  `).join("");
+    <div class="result-item">
+      <strong>${{esc(r.title||"")}}</strong> — ${{esc(r.artist||"")}}
+      <span style="color:var(--muted);font-size:.8rem">score: ${{(r.score||0).toFixed(3)}}</span>
+      <button type="button" class="btn btn-sm" onclick="useAcoustID(${{i}})">Resolve via MB</button>
+      <div class="hint mono">recording_id: ${{esc(r.recording_id||"")}}</div>
+    </div>`).join("");
 }}
 async function useAcoustID(i){{
   const r = window._ac[i]; if(!r || !r.recording_id) return;
@@ -1055,13 +1293,14 @@ async function lastfm(){{
   const res = await fetch(`/api/lastfm_genre?artist=${{encodeURIComponent(artist)}}&title=${{encodeURIComponent(title)}}`);
   const data = await res.json();
   if(!data.results){{ el.textContent = data.error || "No tags"; return; }}
-  el.innerHTML = data.results.map(t => `<button type="button" class="btn" onclick="setField('genre','${{esc(t)}}')">${{esc(t)}}</button>`).join("");
+  el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
 }}
 
 loadDir();
 </script>
 </body>
 </html>"""
+
 
 @app.route("/update", methods=["POST"])
 def update():
@@ -1073,7 +1312,8 @@ def update():
         fields = {k: request.form.get(k, "") for k in [
             "title","artist","album","albumartist","involved_people_list",
             "date","genre","year","original_year","track","publisher","comment",
-            "artist_sort","albumartist_sort","art_url","label","catalog_number"
+            "artist_sort","albumartist_sort","art_url","label","catalog_number",
+            *MB_TXXX_FIELDS,
         ]}
 
         if request.form.get("auto_artist_sort") and not fields["artist_sort"].strip():
