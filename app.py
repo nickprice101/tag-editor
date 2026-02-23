@@ -4,6 +4,7 @@ import base64
 import json
 import shutil
 from io import BytesIO
+from difflib import SequenceMatcher
 from itertools import islice
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -36,7 +37,6 @@ except Exception:
 
 DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "").strip()
 ACOUSTID_KEY = os.getenv("ACOUSTID_KEY", "").strip()
-LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "").strip()
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
@@ -125,6 +125,29 @@ def sort_name(name: str) -> str:
         rest = name[4:].strip()
         return f"{rest}, The" if rest else name
     return name
+
+def obfuscate_key(key: str) -> str:
+    """Show only last 8 chars with x padding, or full key if ≤8 chars."""
+    if not key:
+        return ""
+    n = min(8, len(key))
+    return "x" * (len(key) - n) + key[-n:]
+
+def _similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str) -> float:
+    """Returns a score 0–100 based on query/result similarity (60% title, 40% artist)."""
+    score = 0.0
+    if title_q:
+        score += _similarity(title_q, res_title) * 60
+    if artist_q:
+        score += _similarity(artist_q, res_artist) * 40
+    if title_q and res_title and title_q.lower() == res_title.lower():
+        score += 10
+    return round(min(100.0, score), 1)
 
 def sanitize_component(s: str) -> str:
     s = (s or "").strip()
@@ -466,6 +489,21 @@ def api_art_meta():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route("/api/key_status", methods=["GET"])
+def api_key_status():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    return jsonify({
+        "discogs": {
+            "present": bool(DISCOGS_TOKEN),
+            "display": f"DISCOGS_TOKEN = {obfuscate_key(DISCOGS_TOKEN)}" if DISCOGS_TOKEN else "DISCOGS_TOKEN not set",
+        },
+        "acoustid": {
+            "present": bool(ACOUSTID_KEY),
+            "display": f"ACOUSTID_KEY = {obfuscate_key(ACOUSTID_KEY)}" if ACOUSTID_KEY else "ACOUSTID_KEY not set",
+        },
+    })
+
 @app.route("/api/url_dim", methods=["GET"])
 def api_url_dim():
     if not basic_auth_ok():
@@ -493,14 +531,23 @@ def api_mb_search():
     title = (request.args.get("title") or "").strip()
     artist = (request.args.get("artist") or "").strip()
     album = (request.args.get("album") or "").strip()
-    if not title:
-        return jsonify({"error": "Provide at least a title."}), 400
+    label = (request.args.get("label") or "").strip()
+    year = (request.args.get("year") or "").strip()
+    if not title and not artist:
+        return jsonify({"error": "Provide at least a title or artist."}), 400
 
-    q = f'recording:"{title}"'
+    parts = []
+    if title:
+        parts.append(f'recording:"{title}"')
     if artist:
-        q += f' AND artist:"{artist}"'
+        parts.append(f'artist:"{artist}"')
     if album:
-        q += f' AND release:"{album}"'
+        parts.append(f'release:"{album}"')
+    if label:
+        parts.append(f'label:"{label}"')
+    if year and year.isdigit():
+        parts.append(f'date:{year}')
+    q = " AND ".join(parts)
 
     r = requests.get("https://musicbrainz.org/ws/2/recording",
                      params={"query": q, "fmt": "json", "limit": 10},
@@ -841,15 +888,148 @@ def api_parse_url():
     fields = {k: v for k, v in fields.items() if isinstance(v, str) and v.strip()}
     return jsonify({"fields": fields, "note": "Best-effort parse; verify before writing."})
 
-@app.route("/api/beatport_search", methods=["GET"])
-def api_beatport_search():
+def _parse_web_search_results(site: str, search_url: str, html: str,
+                              artist_q: str, title_q: str) -> list:
+    """Best-effort extraction of track results from a search results page."""
+    results = []
+    soup = BeautifulSoup(html, "html.parser")
+
+    if site == "Bandcamp":
+        for item in soup.find_all("li", class_=re.compile(r"searchresult")):
+            heading = item.find(class_="heading")
+            subhead = item.find(class_="subhead")
+            link_el = heading.find("a") if heading else None
+            item_url = link_el["href"] if link_el else search_url
+            t = heading.get_text(strip=True) if heading else ""
+            artist = ""
+            if subhead:
+                sub = subhead.get_text(strip=True)
+                artist = sub[3:] if sub.startswith("by ") else sub
+            if t:
+                results.append({
+                    "source": "Bandcamp", "title": t, "artist": artist,
+                    "url": item_url,
+                    "score": _score_result(artist_q, title_q, artist, t),
+                })
+
+    elif site == "Juno":
+        for item in soup.find_all("div", class_=re.compile(r"juno-artist|jd-listing-item|track_search_results")):
+            title_el = item.find(class_=re.compile(r"juno-title|title"))
+            artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
+            link_el = item.find("a", href=True)
+            t = title_el.get_text(strip=True) if title_el else ""
+            a = artist_el.get_text(strip=True) if artist_el else ""
+            url = link_el["href"] if link_el else search_url
+            if url and not url.startswith("http"):
+                url = "https://www.junodownload.com" + url
+            if t:
+                results.append({
+                    "source": "Juno", "title": t, "artist": a,
+                    "url": url or search_url,
+                    "score": _score_result(artist_q, title_q, a, t),
+                })
+        # fallback: product heading
+        if not results:
+            for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
+                link_el = item.find("a", href=re.compile(r"/products/"))
+                title_el = item.find("span", class_=re.compile(r"title"))
+                artist_el = item.find("span", class_=re.compile(r"artist"))
+                t = title_el.get_text(strip=True) if title_el else ""
+                a = artist_el.get_text(strip=True) if artist_el else ""
+                url = ("https://www.junodownload.com" + link_el["href"]) if link_el else search_url
+                if t:
+                    results.append({
+                        "source": "Juno", "title": t, "artist": a,
+                        "url": url, "score": _score_result(artist_q, title_q, a, t),
+                    })
+
+    elif site == "Traxsource":
+        for item in soup.find_all("li", class_=re.compile(r"trk-row")):
+            title_el = item.find(class_="title")
+            artist_el = item.find(class_=re.compile(r"artists?"))
+            link_el = item.find("a", href=re.compile(r"/title/"))
+            t = title_el.get_text(strip=True) if title_el else ""
+            a = artist_el.get_text(strip=True) if artist_el else ""
+            url = ("https://www.traxsource.com" + link_el["href"]) if link_el else search_url
+            if t:
+                results.append({
+                    "source": "Traxsource", "title": t, "artist": a,
+                    "url": url, "score": _score_result(artist_q, title_q, a, t),
+                })
+
+    elif site == "Beatport":
+        next_data = soup.find("script", id="__NEXT_DATA__")
+        if next_data and next_data.string:
+            try:
+                nd = json.loads(next_data.string)
+                queries = (nd.get("props", {}).get("pageProps", {})
+                           .get("dehydratedState", {}).get("queries", []))
+                for q_item in queries:
+                    tracks_data = (q_item.get("state", {}).get("data", {})
+                                   .get("tracks", {}).get("data", []) or [])
+                    for track in tracks_data:
+                        t = track.get("name", "") or ""
+                        artists = track.get("artists", []) or []
+                        a = ", ".join(x.get("name", "") for x in artists if x.get("name"))
+                        slug = track.get("slug", "")
+                        tid = track.get("id", "")
+                        url = f"https://www.beatport.com/track/{slug}/{tid}" if slug else search_url
+                        if t:
+                            results.append({
+                                "source": "Beatport", "title": t, "artist": a,
+                                "url": url, "score": _score_result(artist_q, title_q, a, t),
+                            })
+            except Exception:
+                pass
+
+    # If nothing structured was found, return the search URL as a fallback entry
+    if not results:
+        results.append({
+            "source": site,
+            "title": f"View search results on {site}",
+            "artist": "",
+            "url": search_url,
+            "score": 0.0,
+            "note": "No structured results extracted; click to search manually.",
+        })
+    return results
+
+
+@app.route("/api/web_search_stream", methods=["GET"])
+def api_web_search_stream():
     if not basic_auth_ok():
         return require_basic_auth()
-    q = (request.args.get("q") or "").strip()
-    if not q:
-        return jsonify({"error": "Provide a query."}), 400
-    url = f"https://www.beatport.com/search?q={requests.utils.quote(q)}"
-    return jsonify({"open_url": url, "note": "Beatport search is dynamic. Open link and paste a specific track/release URL into Parse URL."})
+    artist = (request.args.get("artist") or "").strip()
+    title = (request.args.get("title") or "").strip()
+    q = (request.args.get("q") or "").strip() or f"{artist} {title}".strip()
+
+    def generate():
+        if not q:
+            yield sse_event("apierror", "Provide a query.")
+            return
+        qq = requests.utils.quote(q)
+        sites = [
+            ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
+            ("Traxsource",  f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"),
+            ("Bandcamp",    f"https://bandcamp.com/search?q={qq}&item_type=t"),
+            ("Juno",        f"https://www.junodownload.com/search/?q={qq}&solrorder=relevancy"),
+        ]
+        all_results = []
+        for site_name, search_url in sites:
+            yield sse_event("log", f"Searching {site_name}\u2026")
+            try:
+                r = http_get(search_url, timeout=15)
+                found = _parse_web_search_results(site_name, search_url, r.text, artist, title)
+                all_results.extend(found)
+                yield sse_event("log", f"{site_name}: {len(found)} result(s)")
+            except Exception as exc:
+                yield sse_event("log", f"{site_name}: error \u2014 {str(exc)[:120]}")
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        top = all_results[:10]
+        yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
+        yield sse_event("result", json.dumps({"results": top}))
+
+    return sse_response(generate())
 
 # ----- SSE streaming helpers -----
 _MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if exceeded)
@@ -937,32 +1117,6 @@ def api_acoustid():
 
     out = list(islice(_parse_acoustid_response(results), 10))
     return jsonify({"results": out})
-
-# ----- Last.fm genre suggest -----
-@app.route("/api/lastfm_genre", methods=["GET"])
-def api_lastfm_genre():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    if not LASTFM_API_KEY:
-        return jsonify({"error": "LASTFM_API_KEY not set."}), 400
-
-    artist = (request.args.get("artist") or "").strip()
-    title = (request.args.get("title") or "").strip()
-    if not artist or not title:
-        return jsonify({"error": "Provide artist and title."}), 400
-
-    r = http_get("https://ws.audioscrobbler.com/2.0/",
-                 params={"method":"track.getTopTags","api_key":LASTFM_API_KEY,"artist":artist,"track":title,"format":"json"},
-                 timeout=25)
-    r.raise_for_status()
-    data = r.json()
-    tags = data.get("toptags", {}).get("tag", []) or []
-    top = []
-    for t in tags[:12]:
-        name = t.get("name", "")
-        if name:
-            top.append(name)
-    return jsonify({"results": top})
 
 # ----- Streaming endpoints (SSE) -----
 
@@ -1116,38 +1270,6 @@ def api_acoustid_stream():
 
     return sse_response(generate())
 
-@app.route("/api/lastfm_genre_stream", methods=["GET"])
-def api_lastfm_genre_stream():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    artist = (request.args.get("artist") or "").strip()
-    title = (request.args.get("title") or "").strip()
-
-    def generate():
-        if not LASTFM_API_KEY:
-            yield sse_event("apierror", "LASTFM_API_KEY not set.")
-            return
-        if not artist or not title:
-            yield sse_event("apierror", "Provide artist and title.")
-            return
-        yield sse_event("log", f"Querying Last.fm: {artist!r} \u2014 {title!r}\u2026")
-        try:
-            r = http_get("https://ws.audioscrobbler.com/2.0/",
-                         params={"method": "track.getTopTags", "api_key": LASTFM_API_KEY,
-                                 "artist": artist, "track": title, "format": "json"},
-                         timeout=25)
-            r.raise_for_status()
-            data = r.json()
-            tags = data.get("toptags", {}).get("tag", []) or []
-            top = [t.get("name", "") for t in tags[:12] if t.get("name", "")]
-            yield sse_event("log", f"Got {len(top)} tag(s).")
-            yield sse_event("result", json.dumps({"results": top}))
-        except Exception as e:
-            yield sse_event("apierror", str(e))
-
-    return sse_response(generate())
-
-
 @app.route("/", methods=["GET"])
 def ui_home():
     if not basic_auth_ok():
@@ -1240,8 +1362,10 @@ def ui_home():
     }}
     .file-item:last-child {{ border-bottom: none; }}
     .file-item:hover {{ background: #f0f4ff; }}
+    .file-item.selected {{ background: #dbeafe; }}
     .file-item.no-genre {{ background: var(--no-genre); }}
     .file-item.no-genre:hover {{ background: #ffe4e4; }}
+    .file-item.no-genre.selected {{ background: #dbeafe; }}
     .file-thumb {{ width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; object-fit: cover; flex-shrink: 0; }}
     .file-thumb-placeholder {{
       width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; background: #e5e7eb;
@@ -1299,7 +1423,7 @@ def ui_home():
 <div class="row2">
   <div class="card">
     <h2>Browse</h2>
-    <p class="sub">Navigate folders and click a file to edit.</p>
+    <p class="sub">Navigate folders. <strong>Double-click</strong> a file to load it for editing.</p>
     <label>Directory</label>
     <input id="dir" value="{browse_default}"/>
     <label>Filter (optional)</label>
@@ -1312,7 +1436,7 @@ def ui_home():
 
   <div class="card">
     <h2>Search</h2>
-    <p class="sub">Search recursively under a directory.</p>
+    <p class="sub">Search recursively. <strong>Double-click</strong> a file to load it.</p>
     <label>Search root</label>
     <input id="sroot" value="{MUSIC_ROOT}"/>
     <label>Query</label>
@@ -1328,14 +1452,9 @@ def ui_home():
   <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">{MUSIC_ROOT}/Genre/AlbumArtist/Album [Year]/</span>.</p>
 
   <form id="tagForm" method="POST" action="/update">
-    <label>File path</label>
-    <input name="path" id="path" value="{path}"/>
-    <button type="button" class="btn" onclick="loadTags()">Load existing tags &amp; audio info</button>
+    <input type="hidden" name="path" id="path" value="{path}"/>
+    <div id="currentFile" class="hint" style="margin-bottom:8px;font-size:.88rem">Double-click a file in Browse or Search to load it for editing.</div>
     <div id="loadMsg" class="hint"></div>
-    <div id="artPreview" style="display:none;margin:10px 0;gap:12px;align-items:flex-start">
-      <img id="artImg" src="" style="max-width:180px;max-height:180px;border-radius:8px;cursor:pointer" alt="Embedded artwork" onclick="showImageModal(this.src)"/>
-      <span id="artDims" class="hint" style="margin-top:4px"></span>
-    </div>
 
     <hr class="section-sep"/>
 
@@ -1343,35 +1462,34 @@ def ui_home():
       <h3>Lookups</h3>
       <div class="row2">
         <div>
-          <button type="button" class="btn btn-outline" onclick="mbSearch()">MusicBrainz Search</button>
+          <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">&#127925; MusicBrainz Search&hellip;</button>
           <div id="mbResults"></div>
         </div>
         <div>
-          <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
+          <button type="button" class="btn btn-outline" onclick="discogsSearch()">&#128191; Discogs Search (album)</button>
           <div id="discogsStatus" class="stream-status"></div>
-          <p class="sub">Needs DISCOGS_TOKEN env. Includes tracklist picker.</p>
+          <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
           <div id="discogsResults"></div>
           <div id="discogsTracklist"></div>
         </div>
       </div>
-      <div class="row2">
+      <div class="row2" style="margin-top:12px">
         <div>
+          <input id="wsq" placeholder="Web search: e.g. Artist \u2013 Title"/>
+          <button type="button" class="btn btn-outline" onclick="webSearch()">&#127760; Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
+          <div id="webSearchStatus" class="stream-status"></div>
+          <div id="webSearchResults"></div>
+          <hr class="section-sep"/>
           <input id="purl" placeholder="Paste URL: Beatport / Bandcamp / Juno / Traxsource"/>
           <button type="button" class="btn btn-outline" onclick="parseUrl()">Parse URL</button>
-          <input id="bpq" placeholder="Beatport search query (optional)"/>
-          <button type="button" class="btn btn-outline" onclick="beatportSearch()">Beatport Search</button>
           <div id="parseResults"></div>
         </div>
         <div>
-          <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
+          <button type="button" class="btn btn-outline" onclick="acoustid()">&#127925; AcoustID Fingerprint</button>
           <div id="acoustidStatus" class="stream-status"></div>
-          <p class="sub">Needs ACOUSTID_KEY env.</p>
+          <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
           <div id="acoustidResults"></div>
           <div id="acoustidMbStatus" class="hint"></div>
-          <button type="button" class="btn btn-outline" onclick="lastfm()">Last.fm Genre Suggest</button>
-          <div id="lastfmStatus" class="stream-status"></div>
-          <p class="sub">Needs LASTFM_API_KEY env.</p>
-          <div id="lastfmResults"></div>
         </div>
       </div>
     </div>
@@ -1434,11 +1552,19 @@ def ui_home():
       </div>
       <div class="field-group">
         <label>Cover art image URL</label>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
-          <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="flex:1;margin-bottom:0" onblur="checkArtUrlDim()"/>
-          <button type="button" class="btn btn-sm btn-ghost" onclick="copyArtUrl()" title="Copy URL">&#128203;</button>
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+              <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="flex:1;margin-bottom:0" onblur="checkArtUrlDim()"/>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="copyArtUrl()" title="Copy URL">&#128203;</button>
+            </div>
+            <div id="artUrlDims" class="hint"></div>
+          </div>
+          <div id="artPreview" style="display:none;flex-shrink:0;text-align:center">
+            <img id="artImg" src="" style="max-width:120px;max-height:120px;border-radius:8px;cursor:pointer;display:block" alt="Embedded artwork" onclick="showArtModal(this.src)"/>
+            <div id="artDims" class="hint" style="margin-top:3px;margin-bottom:0"></div>
+          </div>
         </div>
-        <div id="artUrlDims" class="hint"></div>
       </div>
     </div>
 
@@ -1483,6 +1609,23 @@ def ui_home():
   </div>
 </div>
 
+<div id="mbDialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1001;align-items:center;justify-content:center">
+  <div style="background:var(--card-bg);border-radius:var(--radius);padding:24px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.3);max-height:90vh;overflow-y:auto">
+    <h3 style="margin:0 0 14px">&#127925; MusicBrainz Search</h3>
+    <label>Title</label><input id="mbDlgTitle" placeholder="Track title"/>
+    <label>Artist</label><input id="mbDlgArtist" placeholder="Artist name"/>
+    <label>Album / Release</label><input id="mbDlgAlbum" placeholder="Album or release (optional)"/>
+    <label>Label</label><input id="mbDlgLabel" placeholder="Record label (optional)"/>
+    <label>Year</label><input id="mbDlgYear" placeholder="Year e.g. 2018 (optional)"/>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button type="button" class="btn" onclick="runMbSearch()">Search</button>
+      <button type="button" class="btn btn-ghost" onclick="closeMbDialog()">Cancel</button>
+    </div>
+    <div id="mbDlgStatus" class="hint" style="margin-bottom:8px"></div>
+    <div id="mbDlgResults"></div>
+  </div>
+</div>
+
 <script>
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
 function setField(name, val){{ const el = document.querySelector(`[name="${{name}}"]`); if(el) el.value = val || ""; }}
@@ -1501,7 +1644,7 @@ function renderFileItem(it, idx){{
   const thumb = it.has_art
     ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>&#127925;</div>'">`
     : `<div class="file-thumb-placeholder">&#127925;</div>`;
-  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}">
+  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}" data-path="${{esc(it.path)}}">
     ${{thumb}}
     <div class="file-meta">
       <div class="file-name">${{esc(it.name)}}</div>
@@ -1529,7 +1672,23 @@ async function loadDir(){{
 }}
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
-function openFile(p){{ document.getElementById("path").value = p; document.getElementById("path").scrollIntoView({{behavior:"smooth"}}); }}
+function openFile(p){{
+  document.getElementById("path").value = p;
+  const fn = p.split("/").pop();
+  const cf = document.getElementById("currentFile");
+  if(cf) cf.textContent = `Selected: ${{fn}} \u2014 double-click to load`;
+  // highlight selected item in dir list
+  document.querySelectorAll(".file-item.selected").forEach(el => el.classList.remove("selected"));
+  document.querySelectorAll(`[data-path="${{CSS.escape(p)}}"]`).forEach(el => el.classList.add("selected"));
+}}
+
+async function loadFileByPath(p){{
+  document.getElementById("path").value = p;
+  const fn = p.split("/").pop();
+  const cf = document.getElementById("currentFile");
+  if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
+  await loadTags();
+}}
 
 function upDir(){{
   const d = document.getElementById("dir").value.trim();
@@ -1564,7 +1723,8 @@ const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_rele
 async function loadTags(){{
   const p = document.getElementById("path").value.trim();
   const msg = document.getElementById("loadMsg");
-  msg.textContent = "Loading…";
+  if(!p){{ msg.textContent = "No file selected. Double-click a file in Browse or Search to load."; return; }}
+  msg.textContent = "Loading\u2026";
   const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
   const data = await res.json();
   if(!res.ok){{ msg.textContent = data.error || "Error"; return; }}
@@ -1573,48 +1733,90 @@ async function loadTags(){{
     "label","catalog_number",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  msg.textContent = `Loaded. Art: ${{data.has_art ? "✅ Yes" : "❌ No"}} | ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
+  const fn = p.split("/").pop();
+  const cf = document.getElementById("currentFile");
+  if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
+  msg.textContent = `Art: ${{data.has_art ? "\u2705 Yes" : "\u274c No"}}`;
   const artPrev = document.getElementById("artPreview");
   const artImg = document.getElementById("artImg");
   const artDims = document.getElementById("artDims");
   if(data.has_art){{
     artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1`;
-    artPrev.style.display = "flex";
+    artPrev.style.display = "block";
     fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}`).then(r=>r.json()).then(m=>{{
       if(m.width) artDims.textContent = `${{m.width}}\u00d7${{m.height}}`;
     }}).catch(()=>{{}});
   }} else {{
     artPrev.style.display = "none";
     artImg.src = "";
-    artDims.textContent = "";
+    if(artDims) artDims.textContent = "";
+  }}
+  // Pre-populate web search query if blank
+  const wsq = document.getElementById("wsq");
+  if(wsq && !wsq.value.trim()){{
+    const art = data.artist || ""; const tit = data.title || "";
+    wsq.value = (art && tit) ? `${{art}} \u2013 ${{tit}}` : (art || tit || fn.replace(/\\.mp3$/i,""));
   }}
 }}
 
-async function mbSearch(){{
-  const title = getField("title"); const artist = getField("artist"); const album = getField("album");
-  const el = document.getElementById("mbResults");
-  el.textContent = "Searching…";
-  const res = await fetch(`/api/mb_search?title=${{encodeURIComponent(title)}}&artist=${{encodeURIComponent(artist)}}&album=${{encodeURIComponent(album)}}`);
+function mbSearchDialog(){{
+  const title = getField("title") || inferFromFilename();
+  const artist = getField("artist");
+  document.getElementById("mbDlgTitle").value = title;
+  document.getElementById("mbDlgArtist").value = artist;
+  document.getElementById("mbDlgAlbum").value = getField("album");
+  document.getElementById("mbDlgLabel").value = getField("label");
+  document.getElementById("mbDlgYear").value = getField("year");
+  document.getElementById("mbDlgResults").innerHTML = "";
+  document.getElementById("mbDlgStatus").textContent = "";
+  document.getElementById("mbDialog").style.display = "flex";
+}}
+function closeMbDialog(){{
+  document.getElementById("mbDialog").style.display = "none";
+}}
+function inferFromFilename(){{
+  const p = document.getElementById("path").value.trim();
+  if(!p) return "";
+  return p.split("/").pop().replace(/\\.mp3$/i,"");
+}}
+async function runMbSearch(){{
+  const title = document.getElementById("mbDlgTitle").value.trim();
+  const artist = document.getElementById("mbDlgArtist").value.trim();
+  const album = document.getElementById("mbDlgAlbum").value.trim();
+  const label = document.getElementById("mbDlgLabel").value.trim();
+  const year = document.getElementById("mbDlgYear").value.trim();
+  if(!title && !artist){{ document.getElementById("mbDlgStatus").textContent = "Enter at least a title or artist."; return; }}
+  document.getElementById("mbDlgStatus").textContent = "Searching\u2026";
+  const params = new URLSearchParams();
+  if(title) params.set("title",title);
+  if(artist) params.set("artist",artist);
+  if(album) params.set("album",album);
+  if(label) params.set("label",label);
+  if(year) params.set("year",year);
+  const res = await fetch(`/api/mb_search?${{params}}`);
   const data = await res.json();
-  if(!data.results){{ el.textContent = data.error || "No results"; return; }}
+  const el = document.getElementById("mbDlgResults");
+  if(!data.results){{ document.getElementById("mbDlgStatus").textContent = data.error || "No results"; el.innerHTML=""; return; }}
+  document.getElementById("mbDlgStatus").textContent = `${{data.results.length}} result(s)`;
   window._mb = data.results;
   el.innerHTML = data.results.map((r,i)=>`
-    <div class="result-item">
-      <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
+    <div class="result-item" style="margin-top:8px">
+      <strong>${{esc(r.title)}}</strong> \u2014 ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
       ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` \u2014 ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
-      <button type="button" class="btn btn-sm" onclick="applyMB(${{i}})">Use</button>
+      <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
       <div class="hint mono">MBID: ${{esc(r.id)}}</div>
     </div>`).join("");
 }}
-async function applyMB(i){{
+async function applyMBFromDialog(i){{
   const r = window._mb[i]; if(!r || !r.id) return;
-  document.getElementById("mbResults").insertAdjacentHTML("beforeend",`<div class="hint" id="_mbApplyMsg">Fetching full MB data\u2026</div>`);
+  document.getElementById("mbDlgStatus").textContent = "Fetching full MB data\u2026";
   const res = await fetch(`/api/mb_recording?id=${{encodeURIComponent(r.id)}}`);
   const data = await res.json();
-  const st = document.getElementById("_mbApplyMsg");
-  if(!data.fields){{ if(st) st.textContent = data.error || "Error"; return; }}
-  for(const [k,v] of Object.entries(data.fields)) setField(k, v);
-  if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
+  if(!data.fields){{ document.getElementById("mbDlgStatus").textContent = data.error || "Error"; return; }}
+  for(const [k,v] of Object.entries(data.fields)) setField(k,v);
+  document.getElementById("mbDlgStatus").textContent = "\u2713 Applied all MB/Picard fields.";
+  document.getElementById("mbResults").innerHTML = `<div class="result-item"><strong>${{esc(r.title||"")}}</strong> \u2014 ${{esc(r.artist||"")}} <span class="hint">\u2713 Applied from MusicBrainz</span></div>`;
+  closeMbDialog();
 }}
 
 const _MAX_SSE_DATA = 3000;
@@ -1717,20 +1919,45 @@ async function parseUrl(){{
   el.innerHTML = noteHtml;
 }}
 
-async function beatportSearch(){{
-  const q = document.getElementById("bpq").value.trim();
-  const el = document.getElementById("parseResults");
-  const res = await fetch(`/api/beatport_search?q=${{encodeURIComponent(q)}}`);
-  const data = await res.json();
-  if(data.open_url){{
-    el.innerHTML = `Open: <a href="${{esc(data.open_url)}}" target="_blank">${{esc(data.open_url)}}</a><div class="hint">${{esc(data.note||"")}}</div>`;
-  }} else {{
-    el.textContent = data.error || "Error";
+function webSearch(){{
+  const wsq = document.getElementById("wsq");
+  const q = (wsq ? wsq.value.trim() : "") || ((getField("artist")+" "+getField("title")).trim()) || inferFromFilename();
+  if(!q){{ document.getElementById("webSearchResults").textContent = "Enter a search query or load a file first."; return; }}
+  document.getElementById("webSearchResults").innerHTML = "";
+  startStream("webSearch",
+    `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}`,
+    function(data){{
+      const el = document.getElementById("webSearchResults");
+      if(!data.results || !data.results.length){{ el.textContent = "No results found."; return; }}
+      window._webResults = data.results;
+      el.innerHTML = data.results.map((r,i)=>`
+        <div class="result-item">
+          <span style="background:#e5e7eb;border-radius:4px;padding:1px 7px;font-size:.76rem;font-weight:700">${{esc(r.source||"")}}</span>
+          <strong style="margin-left:6px">${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
+          ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
+          <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
+            ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
+            <button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>
+            <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
+          </div>
+          ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
+        </div>`).join("");
+    }}
+  );
+}}
+async function applyWebResult(i){{
+  const r = window._webResults[i]; if(!r) return;
+  if(r.url && !r.url.includes("?q=") && !r.url.includes("?term=") && !r.url.includes("/search")){{
+    document.getElementById("purl").value = r.url;
+    parseUrl();
+  }} else if(r.url){{
+    window.open(r.url,"_blank","noopener");
   }}
 }}
 
 function acoustid() {{
   const p = document.getElementById("path").value.trim();
+  if(!p){{ document.getElementById("acoustidResults").textContent = "Load a file first."; return; }}
   document.getElementById("acoustidResults").innerHTML = "";
   startStream("acoustid",
     `/api/acoustid_stream?path=${{encodeURIComponent(p)}}`,
@@ -1783,6 +2010,13 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   if(it.type === "dir") openDir(it.path);
   else openFile(it.path);
 }});
+document.getElementById("dirList").addEventListener("dblclick", function(e){{
+  const item = e.target.closest("[data-idx]");
+  if(!item) return;
+  const it = _dirItems[parseInt(item.dataset.idx, 10)];
+  if(!it || it.type === "dir") return;
+  loadFileByPath(it.path);
+}});
 
 document.getElementById("sList").addEventListener("click", function(e){{
   const item = e.target.closest("[data-idx]");
@@ -1790,6 +2024,13 @@ document.getElementById("sList").addEventListener("click", function(e){{
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   openFile(it.path);
+}});
+document.getElementById("sList").addEventListener("dblclick", function(e){{
+  const item = e.target.closest("[data-idx]");
+  if(!item) return;
+  const it = _searchItems[parseInt(item.dataset.idx, 10)];
+  if(!it) return;
+  loadFileByPath(it.path);
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
@@ -1811,6 +2052,17 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
       if(data.label) html += `<div><strong>Label:</strong> ${{esc(data.label)}}</div>`;
       if(data.catalog_number) html += `<div><strong>Catalog #:</strong> ${{esc(data.catalog_number)}}</div>`;
       showModal(html);
+      // Refresh art preview if art_url was set
+      const artUrlVal = getField("art_url");
+      if(artUrlVal){{
+        const p2 = document.getElementById("path").value.trim();
+        const artImg2 = document.getElementById("artImg");
+        const artPrev2 = document.getElementById("artPreview");
+        if(artImg2 && p2){{
+          artImg2.src = `/api/art?path=${{encodeURIComponent(p2)}}&full=1&t=${{Date.now()}}`;
+          if(artPrev2) artPrev2.style.display = "block";
+        }}
+      }}
     }} else {{
       showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x274C; Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
     }}
@@ -1824,11 +2076,34 @@ function showModal(html) {{
   document.getElementById("resultModal").classList.add("open");
 }}
 
+function showArtModal(src) {{
+  showModal(`<img src="${{esc(src)}}" style="max-width:100%;border-radius:8px;display:block" alt="Cover art"/>`);
+}}
+
 function showImageModal(src) {{
   const s = String(src || "");
   if(!/^https?:\\/\\//i.test(s)) return;
   showModal(`<img src="${{esc(s)}}" style="max-width:100%;border-radius:8px;display:block" alt=""/>`);
 }}
+
+async function loadKeyStatus(){{
+  try{{
+    const res = await fetch("/api/key_status");
+    const data = await res.json();
+    const dk = document.getElementById("discogsKeyStatus");
+    const ak = document.getElementById("acoustidKeyStatus");
+    if(dk) dk.textContent = data.discogs?.display || "";
+    if(ak) ak.textContent = data.acoustid?.display || "";
+  }} catch(e){{}}
+}}
+
+document.addEventListener("keydown", function(e){{
+  if(e.key === "Escape") {{
+    const mbDlg = document.getElementById("mbDialog");
+    if(mbDlg && mbDlg.style.display !== "none") closeMbDialog();
+    else closeModal();
+  }}
+}});
 
 function copyArtUrl() {{
   const v = document.getElementById("art_url_field");
@@ -1858,6 +2133,7 @@ function closeModal() {{
 }}
 
 loadDir();
+loadKeyStatus();
 </script>
 </body>
 </html>"""
