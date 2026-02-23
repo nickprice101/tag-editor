@@ -505,11 +505,21 @@ def api_mb_resolve():
         ac = data.get("artist-credit", [])
         artist = ac[0].get("name") if ac else ""
         date = data.get("first-release-date", "") or ""
+        releases = data.get("releases", []) or []
+        album = ""
+        albumartist = ""
+        if releases:
+            rel = releases[0]
+            album = rel.get("title", "") or ""
+            rel_ac = rel.get("artist-credit", []) or []
+            albumartist = rel_ac[0].get("name", "") if rel_ac else ""
         return jsonify({"fields": {
             "title": data.get("title", "") or "",
             "artist": artist or "",
             "date": date,
-            "year": date[:4] if date[:4].isdigit() else ""
+            "year": date[:4] if date[:4].isdigit() else "",
+            "album": album,
+            "albumartist": albumartist,
         }})
     else:
         ac = data.get("artist-credit", [])
@@ -730,6 +740,40 @@ def sse_response(gen):
 import tempfile
 import subprocess
 
+def _parse_acoustid_response(raw_data):
+    """Yield dicts with score/recording_id/title/artist/album/albumartist/year
+    from a raw AcoustID API response (parse=False).  Resilient to missing fields."""
+    for res_item in (raw_data.get("results") or []):
+        score = float(res_item.get("score", 0.0))
+        for rec in (res_item.get("recordings") or []):
+            recording_id = rec.get("id") or ""
+            title = rec.get("title") or ""
+            rec_artists = rec.get("artists") or []
+            artist = rec_artists[0].get("name") or "" if rec_artists else ""
+
+            releases = rec.get("releases") or []
+            album = ""
+            albumartist = ""
+            year = ""
+            if releases:
+                rel = releases[0]
+                album = rel.get("title") or ""
+                rel_artists = rel.get("artists") or []
+                albumartist = rel_artists[0].get("name") or "" if rel_artists else ""
+                date_obj = rel.get("date") or {}
+                if isinstance(date_obj, dict) and date_obj.get("year"):
+                    year = str(date_obj["year"])
+
+            yield {
+                "score": score,
+                "recording_id": recording_id,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "albumartist": albumartist,
+                "year": year,
+            }
+
 @app.route("/api/acoustid", methods=["GET"])
 def api_acoustid():
     if not basic_auth_ok():
@@ -740,7 +784,7 @@ def api_acoustid():
     path = safe_path(request.args.get("path", ""))
 
     def do_match(pth: str):
-        return acoustid.match(ACOUSTID_KEY, pth, parse=True)
+        return acoustid.match(ACOUSTID_KEY, pth, meta="recordings releases", parse=False)
 
     try:
         results = do_match(path)
@@ -764,14 +808,7 @@ def api_acoustid():
         else:
             return jsonify({"error": f"AcoustID lookup failed: {e}"}), 400
 
-    out = []
-    for score, recording_id, title, artist in islice(results, 10):
-        out.append({
-            "score": float(score),
-            "recording_id": recording_id or "",
-            "title": title or "",
-            "artist": artist or "",
-        })
+    out = list(islice(_parse_acoustid_response(results), 10))
     return jsonify({"results": out})
 
 # ----- Last.fm genre suggest -----
@@ -919,7 +956,7 @@ def api_acoustid_stream():
         yield sse_event("log", "Computing audio fingerprint\u2026")
 
         def do_match(pth):
-            return acoustid.match(ACOUSTID_KEY, pth, parse=True)
+            return acoustid.match(ACOUSTID_KEY, pth, meta="recordings releases", parse=False)
 
         try:
             results = do_match(path)
@@ -946,14 +983,7 @@ def api_acoustid_stream():
             else:
                 yield sse_event("apierror", f"AcoustID lookup failed: {e}")
                 return
-        out = []
-        for score, recording_id, title, artist in islice(results, 10):
-            out.append({
-                "score": float(score),
-                "recording_id": recording_id or "",
-                "title": title or "",
-                "artist": artist or "",
-            })
+        out = list(islice(_parse_acoustid_response(results), 10))
         yield sse_event("log", f"Found {len(out)} match(es).")
         yield sse_event("result", json.dumps({"results": out}))
 
@@ -1564,6 +1594,7 @@ function acoustid() {{
       el.innerHTML = data.results.map((r,i) => `
         <div class="result-item">
           <strong>${{esc(r.title||"")}}</strong> — ${{esc(r.artist||"")}}
+          ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}${{r.year ? ` (${{esc(r.year)}})` : ""}}</div>` : ""}}
           <span style="color:var(--muted);font-size:.8rem">score: ${{(r.score||0).toFixed(3)}}</span>
           <button type="button" class="btn btn-sm" onclick="useAcoustID(${{i}})">Resolve via MB</button>
           <div class="hint mono">recording_id: ${{esc(r.recording_id||"")}}</div>
