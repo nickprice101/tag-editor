@@ -4,6 +4,7 @@ import base64
 import json
 import shutil
 from io import BytesIO
+from itertools import islice
 from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
@@ -752,7 +753,7 @@ def api_acoustid():
             return jsonify({"error": f"AcoustID lookup failed: {e}"}), 400
 
     out = []
-    for score, recording_id, title, artist in results[:10]:
+    for score, recording_id, title, artist in islice(results, 10):
         out.append({
             "score": float(score),
             "recording_id": recording_id or "",
