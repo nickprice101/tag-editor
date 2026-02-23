@@ -149,6 +149,62 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str) 
         score += 10
     return round(min(100.0, score), 1)
 
+def _normalize_tag(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace for genre comparison."""
+    s = s.lower().strip()
+    s = re.sub(r"[^\w\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _genre_folders() -> list:
+    """Return sorted immediate subdirectory names under MUSIC_ROOT, excluding Downloads."""
+    try:
+        root = os.path.realpath(MUSIC_ROOT)
+        folders = []
+        with os.scandir(root) as it:
+            for e in it:
+                if (e.is_dir(follow_symlinks=False)
+                        and not e.name.startswith(".")
+                        and e.name.lower() != "downloads"):
+                    folders.append(e.name)
+        folders.sort(key=str.lower)
+        return folders
+    except Exception:
+        return []
+
+def _map_tags_to_folders(mb_tags: list, folders: list, threshold: float = 0.72) -> list:
+    """Map MusicBrainz tag names to MUSIC_ROOT folder names.
+    Returns list of match dicts sorted by quality (exact first, then score desc)."""
+    if not mb_tags or not folders:
+        return []
+    norm_folders = [(f, _normalize_tag(f)) for f in folders]
+    results = []
+    seen: set = set()
+    for tag in mb_tags:
+        tag_name = tag.get("name", "")
+        if not tag_name:
+            continue
+        norm_t = _normalize_tag(tag_name)
+        best_folder, best_score, exact = None, 0.0, False
+        for folder, norm_f in norm_folders:
+            if norm_f == norm_t:
+                best_folder, best_score, exact = folder, 1.0, True
+                break
+            s = SequenceMatcher(None, norm_t, norm_f).ratio()
+            if s > best_score:
+                best_score, best_folder = s, folder
+        if best_folder and (exact or best_score >= threshold) and best_folder not in seen:
+            seen.add(best_folder)
+            results.append({
+                "folder": best_folder,
+                "mb_tag": tag_name,
+                "score": round(best_score, 3),
+                "exact": exact,
+                "count": tag.get("count", 0),
+            })
+    results.sort(key=lambda x: (not x["exact"], -x["score"], -x.get("count", 0)))
+    return results
+
 def sanitize_component(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -1270,6 +1326,59 @@ def api_acoustid_stream():
 
     return sse_response(generate())
 
+@app.route("/api/genres", methods=["GET"])
+def api_genres():
+    """Return the list of genre folder names (MUSIC_ROOT subdirs, excluding Downloads)."""
+    if not basic_auth_ok():
+        return require_basic_auth()
+    return jsonify({"genres": _genre_folders()})
+
+_MBID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
+def _valid_mbid(s: str) -> bool:
+    return bool(s and _MBID_RE.match(s))
+
+@app.route("/api/suggest_genre", methods=["GET"])
+def api_suggest_genre():
+    """Suggest a genre folder using MusicBrainz tags for a recording or release MBID."""
+    if not basic_auth_ok():
+        return require_basic_auth()
+    rec_id = (request.args.get("recording_id") or "").strip()
+    rel_id = (request.args.get("release_id") or "").strip()
+    if not rec_id and not rel_id:
+        return jsonify({"error": "Provide recording_id or release_id."}), 400
+    if rec_id and not _valid_mbid(rec_id):
+        return jsonify({"error": "recording_id must be a valid UUID."}), 400
+    if rel_id and not _valid_mbid(rel_id):
+        return jsonify({"error": "release_id must be a valid UUID."}), 400
+    try:
+        mb_tags: list = []
+        if rec_id:
+            r = requests.get(
+                f"https://musicbrainz.org/ws/2/recording/{rec_id}",
+                params={"fmt": "json", "inc": "tags"},
+                timeout=25, headers=mb_headers(),
+            )
+            r.raise_for_status()
+            mb_tags = r.json().get("tags") or []
+        if not mb_tags and rel_id:
+            r = requests.get(
+                f"https://musicbrainz.org/ws/2/release/{rel_id}",
+                params={"fmt": "json", "inc": "tags"},
+                timeout=25, headers=mb_headers(),
+            )
+            r.raise_for_status()
+            mb_tags = r.json().get("tags") or []
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    tags_sorted = sorted(
+        [{"name": t.get("name", ""), "count": t.get("count", 0)} for t in mb_tags if t.get("name")],
+        key=lambda x: -x["count"],
+    )
+    folders = _genre_folders()
+    matches = _map_tags_to_folders(tags_sorted, folders)
+    return jsonify({"mb_tags": tags_sorted, "matches": matches, "genres": folders})
+
 @app.route("/", methods=["GET"])
 def ui_home():
     if not basic_auth_ok():
@@ -1332,6 +1441,8 @@ def ui_home():
       margin-bottom: 12px; transition: border-color .15s;
     }}
     input:focus, textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,111,212,.15); }}
+    input.dirty, textarea.dirty {{ color: #b91c1c; border-color: #b91c1c; }}
+    input.dirty:focus, textarea.dirty:focus {{ box-shadow: 0 0 0 3px rgba(185,28,28,.15); }}
     textarea {{ resize: vertical; }}
     .hint {{ color: var(--muted); font-size: .78rem; margin: -8px 0 10px; }}
     .btn {{
@@ -1514,7 +1625,14 @@ def ui_home():
           <div class="field-group"><label>Date</label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
           <div class="field-group"><label>Year</label><input name="year" placeholder="YYYY"/></div>
           <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
-          <div class="field-group"><label>Genre</label><input name="genre"/></div>
+          <div class="field-group">
+            <label>Genre</label>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+              <input name="genre" style="flex:1;margin-bottom:0"/>
+              <button type="button" class="btn btn-sm btn-outline" onclick="suggestGenre()" title="Suggest genre from MusicBrainz tags">&#127908; Suggest</button>
+            </div>
+            <div id="genreSuggestions" style="margin-top:4px"></div>
+          </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
           <div class="field-group"><label>Publisher</label><input name="publisher"/></div>
           <div class="field-group"><label>Comment</label><textarea name="comment" rows="3"></textarea></div>
@@ -1627,8 +1745,25 @@ def ui_home():
 </div>
 
 <script>
+let _baseline = {{}};
+function setBaseline(data) {{
+  const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "label","catalog_number","art_url",...MB_FIELDS];
+  _baseline = {{}};
+  for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
+  document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
+}}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
-function setField(name, val){{ const el = document.querySelector(`[name="${{name}}"]`); if(el) el.value = val || ""; }}
+function setField(name, val){{
+  const el = document.querySelector(`[name="${{name}}"]`);
+  if(!el) return;
+  el.value = val || "";
+  if(name in _baseline) {{
+    if(el.value !== (_baseline[name] || "")) el.classList.add("dirty");
+    else el.classList.remove("dirty");
+  }}
+}}
 function getField(name){{ const el = document.querySelector(`[name="${{name}}"]`); return el ? el.value : ""; }}
 
 function renderFileItem(it, idx){{
@@ -1733,6 +1868,8 @@ async function loadTags(){{
     "label","catalog_number",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
+  setBaseline(data);
+  document.getElementById("genreSuggestions").innerHTML = "";
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
@@ -2052,6 +2189,10 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
       if(data.label) html += `<div><strong>Label:</strong> ${{esc(data.label)}}</div>`;
       if(data.catalog_number) html += `<div><strong>Catalog #:</strong> ${{esc(data.catalog_number)}}</div>`;
       showModal(html);
+      // Reset dirty-field baseline to current saved state
+      const savedSnap = {{}};
+      for(const k of Object.keys(_baseline)) savedSnap[k] = getField(k);
+      setBaseline(savedSnap);
       // Refresh art preview if art_url was set
       const artUrlVal = getField("art_url");
       if(artUrlVal){{
@@ -2130,6 +2271,65 @@ async function checkArtUrlDim() {{
 
 function closeModal() {{
   document.getElementById("resultModal").classList.remove("open");
+}}
+
+// Real-time dirty tracking for manual input changes
+document.getElementById("tagForm").addEventListener("input", function(e) {{
+  const name = e.target.name;
+  if(!name || !(name in _baseline)) return;
+  if(e.target.value !== (_baseline[name] || "")) e.target.classList.add("dirty");
+  else e.target.classList.remove("dirty");
+}});
+
+async function suggestGenre() {{
+  const rec_id = getField("musicbrainz_trackid");
+  const rel_id = getField("musicbrainz_albumid");
+  const el = document.getElementById("genreSuggestions");
+  if(!rec_id && !rel_id) {{
+    el.innerHTML = '<span style="color:var(--muted);font-size:.82rem">Load MusicBrainz data first (need Track ID or Album ID).</span>';
+    return;
+  }}
+  el.innerHTML = '<span style="color:var(--muted);font-size:.82rem">Fetching MusicBrainz tags\u2026</span>';
+  const params = new URLSearchParams();
+  if(rec_id) params.set("recording_id", rec_id);
+  if(rel_id) params.set("release_id", rel_id);
+  try {{
+    const res = await fetch(`/api/suggest_genre?${{params}}`);
+    const data = await res.json();
+    if(data.error) {{ el.innerHTML = `<span style="color:#991b1b;font-size:.82rem">${{esc(data.error)}}</span>`; return; }}
+    let html = "";
+    if(data.matches && data.matches.length) {{
+      html += '<div style="font-size:.82rem;font-weight:600;margin-bottom:4px">Folder matches:</div>';
+      html += data.matches.slice(0,5).map(m =>
+        `<button type="button" class="btn btn-sm ${{m.exact ? '' : 'btn-outline'}}"
+          onclick="applyGenreSuggestion(${{JSON.stringify(m.folder)}})"
+          title="MB tag: ${{esc(m.mb_tag)}} | score: ${{m.score}}"
+          style="margin-bottom:4px">
+          ${{esc(m.folder)}}${{m.exact ? ' \u2713' : ` (${{Math.round(m.score*100)}}%)`}}
+        </button>`
+      ).join("");
+    }}
+    if(data.mb_tags && data.mb_tags.length) {{
+      html += '<div style="font-size:.82rem;font-weight:600;margin-top:6px;margin-bottom:4px">MB tags:</div>';
+      html += data.mb_tags.slice(0,8).map(t =>
+        `<button type="button" class="btn btn-sm btn-ghost"
+          onclick="applyGenreSuggestion(${{JSON.stringify(t.name)}})"
+          title="count: ${{t.count}}"
+          style="margin-bottom:4px">
+          ${{esc(t.name)}}${{t.count > 1 ? ` (${{t.count}})` : ""}}
+        </button>`
+      ).join("");
+    }}
+    if(!html) html = '<span style="color:var(--muted);font-size:.82rem">No MusicBrainz tags found for this recording.</span>';
+    el.innerHTML = html;
+  }} catch(err) {{
+    el.innerHTML = `<span style="color:#991b1b;font-size:.82rem">Error: ${{esc(err.message)}}</span>`;
+  }}
+}}
+function applyGenreSuggestion(genre) {{
+  setField("genre", genre);
+  document.getElementById("genreSuggestions").innerHTML =
+    `<span style="color:#065f46;font-size:.82rem">\u2713 Applied: ${{esc(genre)}}</span>`;
 }}
 
 loadDir();
