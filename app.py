@@ -3,6 +3,8 @@ import re
 import base64
 import json
 import shutil
+import threading
+import time
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
@@ -515,6 +517,42 @@ def search_files(root_dir: str, q: str, limit: int = 200):
 def mb_headers():
     return {"User-Agent": UA}
 
+_mb_last_req_time: float = 0.0
+_mb_throttle_lock = threading.Lock()
+_MB_THROTTLE_SECS = 1.0
+
+def mb_get(url: str, **kwargs) -> requests.Response:
+    """MusicBrainz HTTP GET: ~1s throttle (best-effort) + retry on errors/429/5xx."""
+    global _mb_last_req_time
+    kwargs.setdefault("timeout", 25)
+    kwargs.setdefault("headers", mb_headers())
+    max_attempts = 3
+    last_exc = None
+    for attempt in range(max_attempts):
+        with _mb_throttle_lock:
+            elapsed = time.monotonic() - _mb_last_req_time
+            if elapsed < _MB_THROTTLE_SECS:
+                time.sleep(_MB_THROTTLE_SECS - elapsed)
+            _mb_last_req_time = time.monotonic()
+        try:
+            r = requests.get(url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                time.sleep(2.0 ** attempt)
+            continue
+        if r.status_code == 429:
+            wait = int(r.headers.get("Retry-After", 2 ** (attempt + 1)))
+            time.sleep(wait)
+            continue
+        if r.status_code >= 500 and attempt < max_attempts - 1:
+            time.sleep(2.0 ** attempt)
+            continue
+        return r
+    if last_exc is not None:
+        raise last_exc
+    raise requests.RequestException(f"MusicBrainz request failed after {max_attempts} attempts")
+
 @app.route("/api/load", methods=["GET"])
 def api_load():
     if not basic_auth_ok():
@@ -646,9 +684,8 @@ def api_mb_search():
         parts.append(f'date:{year}')
     q = " AND ".join(parts)
 
-    r = requests.get("https://musicbrainz.org/ws/2/recording",
-                     params={"query": q, "fmt": "json", "limit": 10},
-                     timeout=25, headers=mb_headers())
+    r = mb_get("https://musicbrainz.org/ws/2/recording",
+                     params={"query": q, "fmt": "json", "limit": 10})
     r.raise_for_status()
     data = r.json()
     out = []
@@ -673,6 +710,74 @@ def api_mb_search():
         })
     return jsonify({"results": out})
 
+@app.route("/api/mb_search_stream", methods=["GET"])
+def api_mb_search_stream():
+    """SSE streaming MusicBrainz recording search with retry+throttle."""
+    if not basic_auth_ok():
+        return require_basic_auth()
+    title = (request.args.get("title") or "").strip()
+    artist = (request.args.get("artist") or "").strip()
+    album = (request.args.get("album") or "").strip()
+    label = (request.args.get("label") or "").strip()
+    year = (request.args.get("year") or "").strip()
+
+    def generate():
+        if not title and not artist:
+            yield sse_event("apierror", "Provide at least a title or artist.")
+            return
+        parts = []
+        if title:
+            parts.append(f'recording:"{title}"')
+        if artist:
+            parts.append(f'artist:"{artist}"')
+        if album:
+            parts.append(f'release:"{album}"')
+        if label:
+            parts.append(f'label:"{label}"')
+        if year and year.isdigit():
+            parts.append(f'date:{year}')
+        q = " AND ".join(parts)
+        yield sse_event("log", f"Querying MusicBrainz for: {q!r}\u2026")
+        try:
+            r = mb_get("https://musicbrainz.org/ws/2/recording",
+                       params={"query": q, "fmt": "json", "limit": 10})
+            r.raise_for_status()
+            data = r.json()
+            out = []
+            for rec in data.get("recordings", []):
+                ac = rec.get("artist-credit", [])
+                artist_name = ac[0].get("name") if ac else ""
+                releases = rec.get("releases", []) or []
+                rec_album = ""
+                albumartist = ""
+                release_id = ""
+                if releases:
+                    rel = releases[0]
+                    rec_album = rel.get("title", "") or ""
+                    rel_ac = rel.get("artist-credit", []) or []
+                    albumartist = rel_ac[0].get("name", "") if rel_ac else ""
+                    release_id = rel.get("id", "") or ""
+                thumb = (
+                    f"https://coverartarchive.org/release/{release_id}/front-250"
+                    if release_id else ""
+                )
+                out.append({
+                    "id": rec.get("id", ""),
+                    "title": rec.get("title", ""),
+                    "artist": artist_name or "",
+                    "album": rec_album,
+                    "albumartist": albumartist,
+                    "date": rec.get("first-release-date", "") or "",
+                    "release_id": release_id,
+                    "thumb": thumb,
+                })
+            yield sse_event("log", f"Found {len(out)} result(s).")
+            yield sse_event("result", json.dumps({"results": out}))
+        except Exception as e:
+            yield sse_event("apierror", str(e))
+
+    return sse_response(generate())
+
 @app.route("/api/mb_resolve", methods=["GET"])
 def api_mb_resolve():
     if not basic_auth_ok():
@@ -687,9 +792,8 @@ def api_mb_resolve():
     if m:
         entity, mbid = m.group(1), m.group(2)
 
-    r = requests.get(f"https://musicbrainz.org/ws/2/{entity}/{mbid}",
-                     params={"fmt": "json", "inc": "artist-credits+releases"},
-                     timeout=25, headers=mb_headers())
+    r = mb_get(f"https://musicbrainz.org/ws/2/{entity}/{mbid}",
+                     params={"fmt": "json", "inc": "artist-credits+releases"})
     r.raise_for_status()
     data = r.json()
 
@@ -733,10 +837,9 @@ def api_mb_recording():
     if not rec_id:
         return jsonify({"error": "Provide a recording MBID."}), 400
 
-    r = requests.get(
+    r = mb_get(
         f"https://musicbrainz.org/ws/2/recording/{rec_id}",
         params={"fmt": "json", "inc": "releases+artist-credits+release-groups"},
-        timeout=25, headers=mb_headers()
     )
     r.raise_for_status()
     data = r.json()
@@ -1271,6 +1374,7 @@ def api_discogs_search_stream():
                     "year": it.get("year", ""),
                     "id": it.get("id", ""),
                     "thumb": it.get("thumb", ""),
+                    "cover_image": it.get("cover_image", ""),
                     "catno": it.get("catno", ""),
                     "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
                 })
@@ -1416,18 +1520,16 @@ def api_suggest_genre():
     try:
         mb_tags: list = []
         if rec_id:
-            r = requests.get(
+            r = mb_get(
                 f"https://musicbrainz.org/ws/2/recording/{rec_id}",
                 params={"fmt": "json", "inc": "tags"},
-                timeout=25, headers=mb_headers(),
             )
             r.raise_for_status()
             mb_tags = r.json().get("tags") or []
         if not mb_tags and rel_id:
-            r = requests.get(
+            r = mb_get(
                 f"https://musicbrainz.org/ws/2/release/{rel_id}",
                 params={"fmt": "json", "inc": "tags"},
-                timeout=25, headers=mb_headers(),
             )
             r.raise_for_status()
             mb_tags = r.json().get("tags") or []
@@ -1670,7 +1772,10 @@ def ui_home():
     <hr class="section-sep"/>
 
     <div class="callout-min">
-      <div class="callout-title">&#11088; Minimum required tags</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="callout-title" style="margin-bottom:0">&#11088; Minimum required tags</div>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">&#8629; Revert</button>
+      </div>
       <div class="row2">
         <div>
           <div class="field-group"><label>Title</label><input name="title"/></div>
@@ -1736,7 +1841,6 @@ def ui_home():
           <div style="flex:1;min-width:0">
             <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
               <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="flex:1;margin-bottom:0" onblur="checkArtUrlDim()"/>
-              <button type="button" class="btn btn-sm btn-ghost" onclick="copyArtUrl()" title="Copy URL">&#128203;</button>
             </div>
             <div id="artUrlDims" class="hint"></div>
           </div>
@@ -1801,7 +1905,8 @@ def ui_home():
       <button type="button" class="btn" onclick="runMbSearch()">Search</button>
       <button type="button" class="btn btn-ghost" onclick="closeMbDialog()">Cancel</button>
     </div>
-    <div id="mbDlgStatus" class="hint" style="margin-bottom:8px"></div>
+    <div id="mbDlgStatus" class="hint" style="margin-bottom:4px"></div>
+    <div id="mbSearchStatus" class="stream-status" style="margin-bottom:8px"></div>
     <div id="mbDlgResults"></div>
   </div>
 </div>
@@ -1978,33 +2083,44 @@ function inferFromFilename(){{
   if(!p) return "";
   return p.split("/").pop().replace(/\\.mp3$/i,"");
 }}
-async function runMbSearch(){{
+function runMbSearch(){{
   const title = document.getElementById("mbDlgTitle").value.trim();
   const artist = document.getElementById("mbDlgArtist").value.trim();
   const album = document.getElementById("mbDlgAlbum").value.trim();
   const label = document.getElementById("mbDlgLabel").value.trim();
   const year = document.getElementById("mbDlgYear").value.trim();
   if(!title && !artist){{ document.getElementById("mbDlgStatus").textContent = "Enter at least a title or artist."; return; }}
-  document.getElementById("mbDlgStatus").textContent = "Searching\u2026";
+  document.getElementById("mbDlgStatus").textContent = "";
+  document.getElementById("mbDlgResults").innerHTML = "";
   const params = new URLSearchParams();
   if(title) params.set("title",title);
   if(artist) params.set("artist",artist);
   if(album) params.set("album",album);
   if(label) params.set("label",label);
   if(year) params.set("year",year);
-  const res = await fetch(`/api/mb_search?${{params}}`);
-  const data = await res.json();
-  const el = document.getElementById("mbDlgResults");
-  if(!data.results){{ document.getElementById("mbDlgStatus").textContent = data.error || "No results"; el.innerHTML=""; return; }}
-  document.getElementById("mbDlgStatus").textContent = `${{data.results.length}} result(s)`;
-  window._mb = data.results;
-  el.innerHTML = data.results.map((r,i)=>`
-    <div class="result-item" style="margin-top:8px">
-      <strong>${{esc(r.title)}}</strong> \u2014 ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
-      ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` \u2014 ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
-      <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
-      <div class="hint mono">MBID: ${{esc(r.id)}}</div>
-    </div>`).join("");
+  startStream("mbSearch",
+    `/api/mb_search_stream?${{params}}`,
+    function(data) {{
+      const el = document.getElementById("mbDlgResults");
+      if(!data.results){{ document.getElementById("mbDlgStatus").textContent = data.error || "No results"; return; }}
+      document.getElementById("mbDlgStatus").textContent = `${{data.results.length}} result(s)`;
+      window._mb = data.results;
+      el.innerHTML = data.results.map((r,i)=>{{
+        const artUrl = r.release_id ? `https://coverartarchive.org/release/${{esc(r.release_id)}}/front` : "";
+        const thumbUrl = r.thumb || "";
+        return `<div class="result-item" style="margin-top:8px">
+          ${{thumbUrl ? `<img src="${{esc(thumbUrl)}}" style="max-height:50px;border-radius:6px;float:right;margin-left:8px;cursor:pointer" onclick="showImageModal('${{esc(artUrl||thumbUrl)}}')" title="Click to enlarge" onerror="this.style.display='none'">` : ""}}
+          <strong>${{esc(r.title)}}</strong> \u2014 ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
+          ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` \u2014 ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
+            <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
+            ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(artUrl)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
+          </div>
+          <div class="hint mono">MBID: ${{esc(r.id)}}</div>
+        </div>`;
+      }}).join("");
+    }}
+  );
 }}
 async function applyMBFromDialog(i){{
   const r = window._mb[i]; if(!r || !r.id) return;
@@ -2068,8 +2184,11 @@ function discogsSearch() {{
         <div class="result-item">
           <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
           <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
-          <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
-          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle;cursor:pointer" onclick="showImageModal(this.src)" title="Click to enlarge">` : ""}}
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
+            <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
+            ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(r.cover_image||r.thumb)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
+            ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;cursor:pointer;vertical-align:middle" onclick="showImageModal('${{esc(r.cover_image||r.thumb)}}')" title="Click to enlarge">` : ""}}
+          </div>
         </div>`).join("");
     }}
   );
@@ -2308,15 +2427,29 @@ document.addEventListener("keydown", function(e){{
   }}
 }});
 
-function copyArtUrl() {{
-  const v = document.getElementById("art_url_field");
-  if(!v || !v.value.trim()) return;
-  navigator.clipboard.writeText(v.value.trim()).then(()=>{{
-    const d = document.getElementById("artUrlDims");
-    const prev = d ? d.textContent : "";
-    if(d) d.textContent = "Copied!";
-    setTimeout(()=>{{ if(d) d.textContent = prev; }}, 1500);
+function copyToClipboard(text, btn) {{
+  navigator.clipboard.writeText(text).then(()=>{{
+    if(btn) {{ const prev = btn.textContent; btn.textContent = "\u2713 Copied!"; setTimeout(()=>{{ btn.textContent = prev; }}, 1500); }}
   }}).catch(()=>{{}});
+}}
+
+async function revertTags() {{
+  const p = document.getElementById("path").value.trim();
+  if(!p) return;
+  const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
+  const data = await res.json();
+  if(!res.ok) return;
+  for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "label","catalog_number","art_url",...MB_FIELDS]){{
+    if(data[k] !== undefined) setField(k, data[k]);
+  }}
+  setBaseline(data);
+  document.getElementById("mbResults").innerHTML = "";
+  document.getElementById("discogsResults").innerHTML = "";
+  document.getElementById("discogsTracklist").innerHTML = "";
+  document.getElementById("parseResults").innerHTML = "";
+  document.getElementById("genreSuggestions").innerHTML = "";
 }}
 
 async function checkArtUrlDim() {{
