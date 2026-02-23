@@ -714,6 +714,18 @@ def api_beatport_search():
     url = f"https://www.beatport.com/search?q={requests.utils.quote(q)}"
     return jsonify({"open_url": url, "note": "Beatport search is dynamic. Open link and paste a specific track/release URL into Parse URL."})
 
+# ----- SSE streaming helpers -----
+_MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if exceeded)
+
+def sse_event(event: str, data: str) -> str:
+    if len(data) > _MAX_SSE_DATA:
+        data = data[:_MAX_SSE_DATA] + "\u2026"
+    return f"event: {event}\ndata: {data}\n\n"
+
+def sse_response(gen):
+    return Response(gen, content_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 # ----- AcoustID -> MB recording resolve -----
 import tempfile
 import subprocess
@@ -788,7 +800,197 @@ def api_lastfm_genre():
             top.append(name)
     return jsonify({"results": top})
 
-# ---------------- UI ----------------
+# ----- Streaming endpoints (SSE) -----
+
+@app.route("/api/discogs_search_stream", methods=["GET"])
+def api_discogs_search_stream():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    artist = (request.args.get("artist") or "").strip()
+    album = (request.args.get("album") or "").strip()
+    q = album or (request.args.get("q") or "").strip()
+
+    def generate():
+        if not DISCOGS_TOKEN:
+            yield sse_event("apierror", "DISCOGS_TOKEN not set.")
+            return
+        if not q:
+            yield sse_event("apierror", "Provide album or query.")
+            return
+        yield sse_event("log", f"Searching Discogs for: {q!r}\u2026")
+        try:
+            params = {"q": q, "type": "release", "per_page": 10}
+            if artist:
+                params["artist"] = artist
+            yield sse_event("log", "Sending request to Discogs API\u2026")
+            r = http_get("https://api.discogs.com/database/search",
+                         params=params, timeout=25,
+                         headers={"Authorization": f"Discogs token={DISCOGS_TOKEN}"})
+            r.raise_for_status()
+            data = r.json()
+            results = []
+            for it in data.get("results", []):
+                results.append({
+                    "title": it.get("title", ""),
+                    "year": it.get("year", ""),
+                    "id": it.get("id", ""),
+                    "thumb": it.get("thumb", ""),
+                    "catno": it.get("catno", ""),
+                    "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
+                })
+            yield sse_event("log", f"Found {len(results)} result(s).")
+            yield sse_event("result", json.dumps({"results": results}))
+        except Exception as e:
+            yield sse_event("apierror", str(e))
+
+    return sse_response(generate())
+
+@app.route("/api/discogs_release_stream", methods=["GET"])
+def api_discogs_release_stream():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    rid = (request.args.get("id") or "").strip()
+
+    def generate():
+        if not DISCOGS_TOKEN:
+            yield sse_event("apierror", "DISCOGS_TOKEN not set.")
+            return
+        if not rid.isdigit():
+            yield sse_event("apierror", "Provide a Discogs release id.")
+            return
+        yield sse_event("log", f"Fetching Discogs release {rid}\u2026")
+        try:
+            r = http_get(f"https://api.discogs.com/releases/{rid}",
+                         timeout=25, headers={"Authorization": f"Discogs token={DISCOGS_TOKEN}"})
+            r.raise_for_status()
+            data = r.json()
+            yield sse_event("log", "Processing release data\u2026")
+            artists = data.get("artists", [])
+            albumartist = artists[0].get("name", "") if artists else ""
+            title = data.get("title", "") or ""
+            year = str(data.get("year", "") or "")
+            labels = data.get("labels", []) or []
+            label = labels[0].get("name", "") if labels else ""
+            catno = labels[0].get("catno", "") if labels else ""
+            images = data.get("images", []) or []
+            art_url = ""
+            if images:
+                prim = [i for i in images if i.get("type") == "primary"]
+                art_url = (prim[0].get("uri") if prim else images[0].get("uri")) or ""
+            tracklist = []
+            for t in (data.get("tracklist", []) or []):
+                tracklist.append({
+                    "position": t.get("position", ""),
+                    "title": t.get("title", ""),
+                    "duration": t.get("duration", ""),
+                })
+            yield sse_event("log", f"Got {len(tracklist)} track(s) in tracklist.")
+            yield sse_event("result", json.dumps({
+                "fields": {
+                    "album": title,
+                    "albumartist": albumartist,
+                    "year": year if year.isdigit() else "",
+                    "label": label,
+                    "catalog_number": catno,
+                    "art_url": art_url,
+                },
+                "tracklist": tracklist,
+            }))
+        except Exception as e:
+            yield sse_event("apierror", str(e))
+
+    return sse_response(generate())
+
+@app.route("/api/acoustid_stream", methods=["GET"])
+def api_acoustid_stream():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    path_arg = request.args.get("path", "")
+
+    def generate():
+        if not ACOUSTID_KEY:
+            yield sse_event("apierror", "ACOUSTID_KEY not set.")
+            return
+        try:
+            path = safe_path(path_arg)
+        except ValueError as exc:
+            yield sse_event("apierror", str(exc))
+            return
+        yield sse_event("log", "Computing audio fingerprint\u2026")
+
+        def do_match(pth):
+            return acoustid.match(ACOUSTID_KEY, pth, parse=True)
+
+        try:
+            results = do_match(path)
+        except Exception as e:
+            msg = str(e).lower()
+            if "could not be decoded" in msg or "decode" in msg:
+                yield sse_event("log", "Decode error, trying ffmpeg fallback\u2026")
+                try:
+                    with tempfile.TemporaryDirectory() as td:
+                        wav = os.path.join(td, "tmp.wav")
+                        yield sse_event("log", "Converting audio with ffmpeg\u2026")
+                        proc = subprocess.run(
+                            ["ffmpeg", "-y", "-v", "error", "-i", path, "-t", "60", "-ac", "2", "-ar", "44100", wav],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                        )
+                        if proc.returncode != 0:
+                            yield sse_event("apierror", f"ffmpeg error: {proc.stderr.strip()[:400]}")
+                            return
+                        yield sse_event("log", "Querying AcoustID\u2026")
+                        results = do_match(wav)
+                except Exception as e2:
+                    yield sse_event("apierror", f"AcoustID lookup failed after ffmpeg fallback: {e2}")
+                    return
+            else:
+                yield sse_event("apierror", f"AcoustID lookup failed: {e}")
+                return
+        out = []
+        for score, recording_id, title, artist in islice(results, 10):
+            out.append({
+                "score": float(score),
+                "recording_id": recording_id or "",
+                "title": title or "",
+                "artist": artist or "",
+            })
+        yield sse_event("log", f"Found {len(out)} match(es).")
+        yield sse_event("result", json.dumps({"results": out}))
+
+    return sse_response(generate())
+
+@app.route("/api/lastfm_genre_stream", methods=["GET"])
+def api_lastfm_genre_stream():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    artist = (request.args.get("artist") or "").strip()
+    title = (request.args.get("title") or "").strip()
+
+    def generate():
+        if not LASTFM_API_KEY:
+            yield sse_event("apierror", "LASTFM_API_KEY not set.")
+            return
+        if not artist or not title:
+            yield sse_event("apierror", "Provide artist and title.")
+            return
+        yield sse_event("log", f"Querying Last.fm: {artist!r} \u2014 {title!r}\u2026")
+        try:
+            r = http_get("https://ws.audioscrobbler.com/2.0/",
+                         params={"method": "track.getTopTags", "api_key": LASTFM_API_KEY,
+                                 "artist": artist, "track": title, "format": "json"},
+                         timeout=25)
+            r.raise_for_status()
+            data = r.json()
+            tags = data.get("toptags", {}).get("tag", []) or []
+            top = [t.get("name", "") for t in tags[:12] if t.get("name", "")]
+            yield sse_event("log", f"Got {len(top)} tag(s).")
+            yield sse_event("result", json.dumps({"results": top}))
+        except Exception as e:
+            yield sse_event("apierror", str(e))
+
+    return sse_response(generate())
+
+
 @app.route("/", methods=["GET"])
 def ui_home():
     if not basic_auth_ok():
@@ -920,6 +1122,16 @@ def ui_home():
       background: var(--card-bg); border-radius: var(--radius); padding: 24px;
       max-width: 540px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,.25);
     }}
+    .stream-status {{
+      font-size: .8rem; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      padding: 5px 9px; border-radius: 6px; background: #f3f4f6;
+      border: 1px solid var(--border); margin: 4px 0 8px;
+      max-height: 110px; overflow-y: auto; display: none;
+    }}
+    .stream-status.active {{ display: block; }}
+    .stream-status .log-line {{ color: var(--muted); }}
+    .stream-status .s-ok {{ color: #065f46; font-weight: 600; }}
+    .stream-status .s-err {{ color: #991b1b; font-weight: 600; }}
   </style>
 </head>
 <body>
@@ -977,6 +1189,7 @@ def ui_home():
         </div>
         <div>
           <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
+          <div id="discogsStatus" class="stream-status"></div>
           <p class="sub">Needs DISCOGS_TOKEN env. Includes tracklist picker.</p>
           <div id="discogsResults"></div>
           <div id="discogsTracklist"></div>
@@ -992,9 +1205,11 @@ def ui_home():
         </div>
         <div>
           <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
+          <div id="acoustidStatus" class="stream-status"></div>
           <p class="sub">Needs ACOUSTID_KEY env.</p>
           <div id="acoustidResults"></div>
           <button type="button" class="btn btn-outline" onclick="lastfm()">Last.fm Genre Suggest</button>
+          <div id="lastfmStatus" class="stream-status"></div>
           <p class="sub">Needs LASTFM_API_KEY env.</p>
           <div id="lastfmResults"></div>
         </div>
@@ -1229,44 +1444,84 @@ async function mbResolve(){{
   el.textContent = "Applied fields from MusicBrainz.";
 }}
 
-async function discogsSearch(){{
+const _MAX_SSE_DATA = 3000;
+const _streams = {{}};
+function startStream(id, url, onResult) {{
+  if (_streams[id]) {{ _streams[id].close(); delete _streams[id]; }}
+  const panel = document.getElementById(id + "Status");
+  if (!panel) return;
+  panel.className = "stream-status active";
+  panel.innerHTML = '<div class="log-line">Starting\u2026</div>';
+  const es = new EventSource(url);
+  _streams[id] = es;
+  es.addEventListener("log", function(e) {{
+    const d = document.createElement("div");
+    d.className = "log-line";
+    d.textContent = (e.data || "").slice(0, _MAX_SSE_DATA);
+    panel.appendChild(d);
+    panel.scrollTop = panel.scrollHeight;
+  }});
+  es.addEventListener("result", function(e) {{
+    es.close(); delete _streams[id];
+    panel.insertAdjacentHTML("beforeend", '<div class="s-ok">\u2713 Done</div>');
+    try {{ onResult(JSON.parse(e.data)); }}
+    catch(err) {{ panel.insertAdjacentHTML("beforeend", `<div class="s-err">Parse error: ${{esc(err.message)}}</div>`); }}
+  }});
+  es.addEventListener("apierror", function(e) {{
+    es.close(); delete _streams[id];
+    panel.insertAdjacentHTML("beforeend", `<div class="s-err">\u2717 ${{esc((e.data||"").slice(0,_MAX_SSE_DATA))}}</div>`);
+  }});
+  es.onerror = function() {{
+    if (_streams[id]) {{
+      es.close(); delete _streams[id];
+      panel.insertAdjacentHTML("beforeend", '<div class="s-err">\u2717 Connection lost</div>');
+    }}
+  }};
+}}
+
+function discogsSearch() {{
   const artist = getField("albumartist") || getField("artist");
   const album = getField("album");
-  const el = document.getElementById("discogsResults");
-  const tl = document.getElementById("discogsTracklist");
-  el.textContent = "Searching…"; tl.innerHTML = "";
-  const res = await fetch(`/api/discogs_search?artist=${{encodeURIComponent(artist)}}&album=${{encodeURIComponent(album)}}`);
-  const data = await res.json();
-  if(!data.results){{ el.textContent = data.error || "No results"; return; }}
-  window._dc = data.results;
-  el.innerHTML = data.results.map((r,i)=>`
-    <div class="result-item">
-      <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
-      <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
-      <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
-      ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle">` : ""}}
-    </div>`).join("");
+  document.getElementById("discogsResults").innerHTML = "";
+  document.getElementById("discogsTracklist").innerHTML = "";
+  startStream("discogs",
+    `/api/discogs_search_stream?artist=${{encodeURIComponent(artist)}}&album=${{encodeURIComponent(album)}}`,
+    function(data) {{
+      const el = document.getElementById("discogsResults");
+      if (!data.results) {{ el.textContent = data.error || "No results"; return; }}
+      window._dc = data.results;
+      el.innerHTML = data.results.map((r,i) => `
+        <div class="result-item">
+          <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
+          <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
+          <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
+          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle">` : ""}}
+        </div>`).join("");
+    }}
+  );
 }}
-async function discogsUse(i){{
+function discogsUse(i) {{
   const r = window._dc[i]; if(!r || !r.id) return;
-  const el = document.getElementById("discogsResults");
-  const tl = document.getElementById("discogsTracklist");
-  el.textContent = "Fetching release…"; tl.innerHTML = "";
-  const res = await fetch(`/api/discogs_release?id=${{encodeURIComponent(r.id)}}`);
-  const data = await res.json();
-  if(!data.fields){{ el.textContent = data.error || "Error"; return; }}
-  for(const [k,v] of Object.entries(data.fields)) setField(k, v);
-  el.textContent = "Applied fields from Discogs. Pick a track below (optional).";
-  const list = data.tracklist || [];
-  tl.innerHTML = list.length ? `<div class="result-item"><strong>Tracklist</strong><br>` +
-    list.map(t => {{
-      const pos = (t.position||"").trim();
-      return `<div style="display:flex;gap:8px;padding:4px 0;cursor:pointer" onclick="applyTrack(\'${{esc(pos)}}\',${{JSON.stringify(t.title||"")}})">
-        <span class="mono" style="min-width:28px">${{esc(pos||"")}}</span>
-        <span style="flex:1">${{esc(t.title||"")}}</span>
-        <span style="color:var(--muted)">${{esc(t.duration||"")}}</span>
-      </div>`;
-    }}).join("") + "</div>" : "";
+  document.getElementById("discogsTracklist").innerHTML = "";
+  startStream("discogs",
+    `/api/discogs_release_stream?id=${{encodeURIComponent(r.id)}}`,
+    function(data) {{
+      if (!data.fields) {{ document.getElementById("discogsResults").textContent = data.error || "Error"; return; }}
+      for(const [k,v] of Object.entries(data.fields)) setField(k, v);
+      document.getElementById("discogsResults").textContent = "Applied fields from Discogs. Pick a track below (optional).";
+      const list = data.tracklist || [];
+      const tl = document.getElementById("discogsTracklist");
+      tl.innerHTML = list.length ? `<div class="result-item"><strong>Tracklist</strong><br>` +
+        list.map(t => {{
+          const pos = (t.position||"").trim();
+          return `<div style="display:flex;gap:8px;padding:4px 0;cursor:pointer" onclick="applyTrack(\'${{esc(pos)}}\',${{JSON.stringify(t.title||"")}})">
+            <span class="mono" style="min-width:28px">${{esc(pos||"")}}</span>
+            <span style="flex:1">${{esc(t.title||"")}}</span>
+            <span style="color:var(--muted)">${{esc(t.duration||"")}}</span>
+          </div>`;
+        }}).join("") + "</div>" : "";
+    }}
+  );
 }}
 function applyTrack(pos, title){{
   const m = (pos||"").match(/^\\d+$/);
@@ -1297,21 +1552,24 @@ async function beatportSearch(){{
   }}
 }}
 
-async function acoustid(){{
+function acoustid() {{
   const p = document.getElementById("path").value.trim();
-  const el = document.getElementById("acoustidResults");
-  el.textContent = "Fingerprinting…";
-  const res = await fetch(`/api/acoustid?path=${{encodeURIComponent(p)}}`);
-  const data = await res.json();
-  if(!data.results){{ el.textContent = data.error || "No results"; return; }}
-  window._ac = data.results;
-  el.innerHTML = data.results.map((r,i)=>`
-    <div class="result-item">
-      <strong>${{esc(r.title||"")}}</strong> — ${{esc(r.artist||"")}}
-      <span style="color:var(--muted);font-size:.8rem">score: ${{(r.score||0).toFixed(3)}}</span>
-      <button type="button" class="btn btn-sm" onclick="useAcoustID(${{i}})">Resolve via MB</button>
-      <div class="hint mono">recording_id: ${{esc(r.recording_id||"")}}</div>
-    </div>`).join("");
+  document.getElementById("acoustidResults").innerHTML = "";
+  startStream("acoustid",
+    `/api/acoustid_stream?path=${{encodeURIComponent(p)}}`,
+    function(data) {{
+      const el = document.getElementById("acoustidResults");
+      if (!data.results) {{ el.textContent = data.error || "No results"; return; }}
+      window._ac = data.results;
+      el.innerHTML = data.results.map((r,i) => `
+        <div class="result-item">
+          <strong>${{esc(r.title||"")}}</strong> — ${{esc(r.artist||"")}}
+          <span style="color:var(--muted);font-size:.8rem">score: ${{(r.score||0).toFixed(3)}}</span>
+          <button type="button" class="btn btn-sm" onclick="useAcoustID(${{i}})">Resolve via MB</button>
+          <div class="hint mono">recording_id: ${{esc(r.recording_id||"")}}</div>
+        </div>`).join("");
+    }}
+  );
 }}
 async function useAcoustID(i){{
   const r = window._ac[i]; if(!r || !r.recording_id) return;
@@ -1319,14 +1577,17 @@ async function useAcoustID(i){{
   await mbResolve();
 }}
 
-async function lastfm(){{
+function lastfm() {{
   const artist = getField("artist"); const title = getField("title");
-  const el = document.getElementById("lastfmResults");
-  el.textContent = "Looking up…";
-  const res = await fetch(`/api/lastfm_genre?artist=${{encodeURIComponent(artist)}}&title=${{encodeURIComponent(title)}}`);
-  const data = await res.json();
-  if(!data.results){{ el.textContent = data.error || "No tags"; return; }}
-  el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
+  document.getElementById("lastfmResults").innerHTML = "";
+  startStream("lastfm",
+    `/api/lastfm_genre_stream?artist=${{encodeURIComponent(artist)}}&title=${{encodeURIComponent(title)}}`,
+    function(data) {{
+      const el = document.getElementById("lastfmResults");
+      if (!data.results) {{ el.textContent = data.error || "No tags"; return; }}
+      el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
+    }}
+  );
 }}
 
 let _dirItems = [], _searchItems = [];
