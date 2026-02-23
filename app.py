@@ -140,10 +140,47 @@ def _similarity(a: str, b: str) -> float:
         return 0.0
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
+# Patterns for query normalisation
+_BRACKET_RE = re.compile(r'\(([^)]*)\)|\[([^\]]*)\]')
+_REMIX_KW_RE = re.compile(r'\b(?:remix|mix|edit|vip|version|bootleg|rework|flip|dub|instrumental|acappella|mashup)\b', re.IGNORECASE)
+_FEAT_RE = re.compile(
+    r'\s*[\(\[]?(?:feat(?:uring)?|ft)\.?\s+[^\)\]]+[\)\]]?'
+    r'|\s+(?:with|w/)\s+[^,\(\[]+',
+    re.IGNORECASE,
+)
+
+def normalize_search_query(title: str, artist: str = "") -> tuple:
+    """Strip bracketed content, feat segments and extract remix tokens for search.
+
+    Returns (clean_title, clean_artist, remix_tokens) where remix_tokens is a
+    list of bracket-content strings that look like remix/edit descriptors.
+    These are stripped from the query so searches stay broad, but can be used
+    as a secondary scoring signal.
+    """
+    remix_tokens: list = []
+
+    # Collect remix tokens from brackets in the title before removing them
+    for m in _BRACKET_RE.finditer(title):
+        content = (m.group(1) or m.group(2) or "").strip()
+        if _REMIX_KW_RE.search(content):
+            remix_tokens.append(content)
+
+    # Strip all bracketed content from title
+    clean_title = _BRACKET_RE.sub(" ", title)
+    # Remove feat segments from title and artist
+    clean_title = _FEAT_RE.sub("", clean_title)
+    clean_artist = _FEAT_RE.sub("", artist)
+
+    # Normalize whitespace and trailing punctuation
+    clean_title = re.sub(r'\s+', ' ', clean_title).strip(" -,")
+    clean_artist = re.sub(r'\s+', ' ', clean_artist).strip(" -,")
+
+    return clean_title, clean_artist, remix_tokens
+
 def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
-                  year_q: str = "", res_year: str = "") -> float:
+                  year_q: str = "", res_year: str = "", remix_tokens: list = None) -> float:
     """Returns a score 0–100 based on query/result similarity (60% title, 40% artist).
-    Optionally boosts by up to 5 points for year match."""
+    Optionally boosts by up to 5 points for year match and up to 5 for remix match."""
     score = 0.0
     if title_q:
         score += _similarity(title_q, res_title) * 60
@@ -157,6 +194,14 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
             score += 5
         elif diff == 1:
             score += 2
+    # Secondary remix-token bonus: small boost when a remix descriptor from the
+    # query appears in the result title (e.g. "Original Mix" query → result title).
+    if remix_tokens and res_title:
+        res_title_lc = res_title.lower()
+        for token in remix_tokens:
+            if token.lower() in res_title_lc or _similarity(token, res_title) > 0.6:
+                score += 5
+                break
     return round(min(100.0, score), 1)
 
 
@@ -671,11 +716,12 @@ def api_mb_search():
     if not title and not artist:
         return jsonify({"error": "Provide at least a title or artist."}), 400
 
+    norm_title, norm_artist, _ = normalize_search_query(title, artist)
     parts = []
-    if title:
-        parts.append(f'recording:"{title}"')
-    if artist:
-        parts.append(f'artist:"{artist}"')
+    if norm_title:
+        parts.append(f'recording:"{norm_title}"')
+    if norm_artist:
+        parts.append(f'artist:"{norm_artist}"')
     if album:
         parts.append(f'release:"{album}"')
     if label:
@@ -725,11 +771,12 @@ def api_mb_search_stream():
         if not title and not artist:
             yield sse_event("apierror", "Provide at least a title or artist.")
             return
+        norm_title, norm_artist, _ = normalize_search_query(title, artist)
         parts = []
-        if title:
-            parts.append(f'recording:"{title}"')
-        if artist:
-            parts.append(f'artist:"{artist}"')
+        if norm_title:
+            parts.append(f'recording:"{norm_title}"')
+        if norm_artist:
+            parts.append(f'artist:"{norm_artist}"')
         if album:
             parts.append(f'release:"{album}"')
         if label:
@@ -1089,7 +1136,8 @@ def api_parse_url():
     return jsonify({"fields": fields, "note": "Best-effort parse; verify before writing."})
 
 def _parse_web_search_results(site: str, search_url: str, html: str,
-                              artist_q: str, title_q: str, year_q: str = "") -> list:
+                              artist_q: str, title_q: str, year_q: str = "",
+                              remix_tokens: list = None) -> list:
     """Best-effort extraction of track results from a search results page."""
     results = []
     soup = BeautifulSoup(html, "html.parser")
@@ -1106,7 +1154,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 sub = subhead.get_text(strip=True)
                 artist = sub[3:] if sub.startswith("by ") else sub
             if t:
-                score = _score_result(artist_q, title_q, artist, t, year_q) + _BANDCAMP_SCORE_BOOST
+                score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens) + _BANDCAMP_SCORE_BOOST
                 results.append({
                     "source": "Bandcamp", "title": t, "artist": artist,
                     "url": item_url,
@@ -1114,7 +1162,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 })
 
     elif site == "Juno":
-        for item in soup.find_all("div", class_=re.compile(r"juno-artist|jd-listing-item|track_search_results")):
+        # Primary: listing items with explicit artist/title elements
+        for item in soup.find_all("div", class_=re.compile(r"jd-listing-item|track_search_results")):
             title_el = item.find(class_=re.compile(r"juno-title|title"))
             artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
             link_el = item.find("a", href=True)
@@ -1124,8 +1173,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             if url and not url.startswith("http"):
                 url = "https://www.junodownload.com" + url
             if t:
-                # release_type/track_count not available from HTML; detect via artist name only
-                score = _score_result(artist_q, title_q, a, t, year_q) + \
+                score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
                 results.append({
                     "source": "Juno", "title": t, "artist": a,
@@ -1142,8 +1190,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 a = artist_el.get_text(strip=True) if artist_el else ""
                 url = ("https://www.junodownload.com" + link_el["href"]) if link_el else search_url
                 if t:
-                    # release_type/track_count not available from HTML; detect via artist name only
-                    score = _score_result(artist_q, title_q, a, t, year_q) + \
+                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                             _compilation_penalty(a)
                     results.append({
                         "source": "Juno", "title": t, "artist": a,
@@ -1160,7 +1207,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             url = ("https://www.traxsource.com" + link_el["href"]) if link_el else search_url
             if t:
                 # release_type/track_count not available from HTML; detect via artist name only
-                score = _score_result(artist_q, title_q, a, t, year_q) + \
+                score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
                 results.append({
                     "source": "Traxsource", "title": t, "artist": a,
@@ -1193,7 +1240,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         release_type = (release.get("type") or "").lower()
                         track_count = int(release.get("track_count") or 0)
                         if t:
-                            score = _score_result(artist_q, title_q, a, t, year_q, res_year) + \
+                            score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
                                     _compilation_penalty(a, release_type, track_count)
                             results.append({
                                 "source": "Beatport", "title": t, "artist": a,
@@ -1201,6 +1248,19 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             })
             except Exception:
                 pass
+        # Beatport fallback: try og:title/og:description if __NEXT_DATA__ yielded nothing
+        if not results:
+            og_title = soup.find("meta", property="og:title")
+            if og_title and og_title.get("content"):
+                t = og_title["content"]
+                results.append({
+                    "source": "Beatport",
+                    "title": t,
+                    "artist": "",
+                    "url": search_url,
+                    "score": _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens),
+                    "note": "Parsed from og:title; click to search manually.",
+                })
 
     # If nothing structured was found, return the search URL as a fallback entry
     if not results:
@@ -1224,23 +1284,30 @@ def api_web_search_stream():
     year = (request.args.get("year") or "").strip()
     q = (request.args.get("q") or "").strip() or f"{artist} {title}".strip()
 
+    # Normalise for query building and scoring
+    norm_title, norm_artist, remix_tokens = normalize_search_query(title or q, artist)
+    norm_q = f"{norm_artist} {norm_title}".strip() if (norm_artist or norm_title) else q
+
     def generate():
         if not q:
             yield sse_event("apierror", "Provide a query.")
             return
-        qq = requests.utils.quote(q)
+        qq = requests.utils.quote(norm_q, safe="")
         sites = [
             ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
             ("Traxsource",  f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"),
             ("Bandcamp",    f"https://bandcamp.com/search?q={qq}&item_type=t"),
-            ("Juno",        f"https://www.junodownload.com/search/?q={qq}&solrorder=relevancy"),
+            ("Juno",        f"https://www.junodownload.com/search/?q[keywords]={qq}&solrorder=relevancy"),
         ]
         all_results = []
         for site_name, search_url in sites:
             yield sse_event("log", f"Searching {site_name}\u2026")
             try:
                 r = http_get(search_url, timeout=15)
-                found = _parse_web_search_results(site_name, search_url, r.text, artist, title, year)
+                found = _parse_web_search_results(
+                    site_name, search_url, r.text,
+                    norm_artist, norm_title, year, remix_tokens,
+                )
                 all_results.extend(found)
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
             except Exception as exc:
@@ -1349,18 +1416,25 @@ def api_discogs_search_stream():
     album = (request.args.get("album") or "").strip()
     q = album or (request.args.get("q") or "").strip()
 
+    # Normalize album and artist for the search query
+    norm_q, norm_artist, _ = normalize_search_query(q, artist)
+    if not norm_q:
+        norm_q = q
+    if not norm_artist:
+        norm_artist = artist
+
     def generate():
         if not DISCOGS_TOKEN:
             yield sse_event("apierror", "DISCOGS_TOKEN not set.")
             return
-        if not q:
+        if not norm_q:
             yield sse_event("apierror", "Provide album or query.")
             return
-        yield sse_event("log", f"Searching Discogs for: {q!r}\u2026")
+        yield sse_event("log", f"Searching Discogs for: {norm_q!r}\u2026")
         try:
-            params = {"q": q, "type": "release", "per_page": 10}
-            if artist:
-                params["artist"] = artist
+            params = {"q": norm_q, "type": "release", "per_page": 10}
+            if norm_artist:
+                params["artist"] = norm_artist
             yield sse_event("log", "Sending request to Discogs API\u2026")
             r = http_get("https://api.discogs.com/database/search",
                          params=params, timeout=25,
@@ -2399,13 +2473,37 @@ function showModal(html) {{
 }}
 
 function showArtModal(src) {{
-  showModal(`<img src="${{esc(src)}}" style="max-width:100%;border-radius:8px;display:block" alt="Cover art"/>`);
+  const imgId = "artModalImg_" + Date.now();
+  const dimId = "artModalDim_" + Date.now();
+  showModal(`
+    <img id="${{imgId}}" src="${{esc(src)}}" style="max-width:100%;border-radius:8px;display:block" alt="Cover art"/>
+    <div id="${{dimId}}" style="color:var(--muted);font-size:.82rem;margin-top:6px;text-align:center"></div>
+  `);
+  const img = document.getElementById(imgId);
+  if(img) {{
+    img.addEventListener("load", function() {{
+      const d = document.getElementById(dimId);
+      if(d && img.naturalWidth && img.naturalHeight) d.textContent = img.naturalWidth + "\u00d7" + img.naturalHeight;
+    }});
+  }}
 }}
 
 function showImageModal(src) {{
   const s = String(src || "");
   if(!/^https?:\\/\\//i.test(s)) return;
-  showModal(`<img src="${{esc(s)}}" style="max-width:100%;border-radius:8px;display:block" alt=""/>`);
+  const imgId = "imgModalImg_" + Date.now();
+  const dimId = "imgModalDim_" + Date.now();
+  showModal(`
+    <img id="${{imgId}}" src="${{esc(s)}}" style="max-width:100%;border-radius:8px;display:block" alt=""/>
+    <div id="${{dimId}}" style="color:var(--muted);font-size:.82rem;margin-top:6px;text-align:center"></div>
+  `);
+  const img = document.getElementById(imgId);
+  if(img) {{
+    img.addEventListener("load", function() {{
+      const d = document.getElementById(dimId);
+      if(d && img.naturalWidth && img.naturalHeight) d.textContent = img.naturalWidth + "\u00d7" + img.naturalHeight;
+    }});
+  }}
 }}
 
 async function loadKeyStatus(){{
@@ -2428,9 +2526,30 @@ document.addEventListener("keydown", function(e){{
 }});
 
 function copyToClipboard(text, btn) {{
-  navigator.clipboard.writeText(text).then(()=>{{
-    if(btn) {{ const prev = btn.textContent; btn.textContent = "\u2713 Copied!"; setTimeout(()=>{{ btn.textContent = prev; }}, 1500); }}
-  }}).catch(()=>{{}});
+  const prev = btn ? btn.textContent : "";
+  function onSuccess() {{
+    if(btn) {{ btn.textContent = "\u2713 Copied!"; setTimeout(()=>{{ btn.textContent = prev; }}, 1500); }}
+  }}
+  function onFail(err) {{
+    if(btn) {{ btn.textContent = "\u274c Failed"; setTimeout(()=>{{ btn.textContent = prev; }}, 2000); }}
+    console.warn("copyToClipboard:", err);
+  }}
+  if(navigator.clipboard && window.isSecureContext) {{
+    navigator.clipboard.writeText(text).then(onSuccess, onFail);
+  }} else {{
+    // Fallback for non-secure contexts or older browsers
+    try {{
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if(ok) onSuccess(); else onFail(new Error("execCommand returned false"));
+    }} catch(e) {{ onFail(e); }}
+  }}
 }}
 
 async function revertTags() {{
