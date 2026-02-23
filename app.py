@@ -21,6 +21,18 @@ from PIL import Image
 APP_USER = os.getenv("APP_USER", "")
 APP_PASS = os.getenv("APP_PASS", "")
 MUSIC_ROOT = os.getenv("MUSIC_ROOT", "/mnt/HD/HD_a2/Media/Music").rstrip("/")
+
+_BROWSE_STARTUP_CANDIDATE = "/mnt/HD/HD_a2/Media/Music/Downloads/youtube-downloads"
+try:
+    _real_cand = os.path.realpath(_BROWSE_STARTUP_CANDIDATE)
+    _real_root = os.path.realpath(MUSIC_ROOT)
+    if (_real_cand.startswith(_real_root + os.sep) or _real_cand == _real_root) and os.path.isdir(_real_cand):
+        _BROWSE_DEFAULT = _real_cand
+    else:
+        _BROWSE_DEFAULT = MUSIC_ROOT
+except Exception:
+    _BROWSE_DEFAULT = MUSIC_ROOT
+
 DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "").strip()
 ACOUSTID_KEY = os.getenv("ACOUSTID_KEY", "").strip()
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "").strip()
@@ -783,6 +795,7 @@ def ui_home():
 
     # If path provided, open editor immediately
     path = (request.args.get("path") or "").strip()
+    browse_default = _BROWSE_DEFAULT
 
     return f"""<!doctype html>
 <html lang="en">
@@ -897,6 +910,15 @@ def ui_home():
     a:hover {{ text-decoration: underline; }}
     .section-sep {{ border: none; border-top: 1px solid var(--border); margin: 16px 0; }}
     .field-group {{ margin-bottom: 0; }}
+    #resultModal {{
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+      z-index: 1000; align-items: center; justify-content: center;
+    }}
+    #resultModal.open {{ display: flex; }}
+    .modal-inner {{
+      background: var(--card-bg); border-radius: var(--radius); padding: 24px;
+      max-width: 540px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,.25);
+    }}
   </style>
 </head>
 <body>
@@ -909,7 +931,7 @@ def ui_home():
     <h2>Browse</h2>
     <p class="sub">Navigate folders and click a file to edit.</p>
     <label>Directory</label>
-    <input id="dir" value="{MUSIC_ROOT}"/>
+    <input id="dir" value="{browse_default}"/>
     <label>Filter (optional)</label>
     <input id="dirFilter" placeholder="e.g. maribou or 2024"/>
     <button class="btn" type="button" onclick="loadDir()">Load</button>
@@ -935,7 +957,7 @@ def ui_home():
   <h2>Edit Tags</h2>
   <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">{MUSIC_ROOT}/Genre/AlbumArtist/Album [Year]/</span>.</p>
 
-  <form method="POST" action="/update">
+  <form id="tagForm" method="POST" action="/update">
     <label>File path</label>
     <input name="path" id="path" value="{path}"/>
     <button type="button" class="btn" onclick="loadTags()">Load existing tags &amp; audio info</button>
@@ -1074,25 +1096,32 @@ def ui_home():
   </form>
 </div>
 
+<div id="resultModal">
+  <div class="modal-inner">
+    <div id="resultModalBody"></div>
+    <button type="button" class="btn" style="margin-top:16px" onclick="closeModal()">Close</button>
+  </div>
+</div>
+
 <script>
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
 function setField(name, val){{ const el = document.querySelector(`[name="${{name}}"]`); if(el) el.value = val || ""; }}
 function getField(name){{ const el = document.querySelector(`[name="${{name}}"]`); return el ? el.value : ""; }}
 
-function renderFileItem(it){{
+function renderFileItem(it, idx){{
   const noGenre = it.type === "file" && !it.genre;
   const genreBadge = it.type === "file"
     ? (it.genre ? `<span class="genre-badge">${{esc(it.genre)}}</span>` : `<span class="genre-missing">no genre</span>`)
     : "";
   if(it.type === "dir"){{
-    return `<div class="dir-item" onclick="openDir(\'${{esc(it.path)}}\')">
+    return `<div class="dir-item" data-idx="${{idx}}">
       <div class="file-thumb-placeholder">&#128193;</div><span>${{esc(it.name)}}</span>
     </div>`;
   }}
   const thumb = it.has_art
     ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>&#127925;</div>'">`
     : `<div class="file-thumb-placeholder">&#127925;</div>`;
-  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" onclick="openFile(\'${{esc(it.path)}}\')">
+  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}">
     ${{thumb}}
     <div class="file-meta">
       <div class="file-name">${{esc(it.name)}}</div>
@@ -1115,7 +1144,8 @@ async function loadDir(){{
   if(!res.ok){{ err.textContent = data.error || "Error"; box.innerHTML=""; return; }}
   err.textContent = "";
   document.getElementById("dir").value = data.dir;
-  box.innerHTML = data.items.map(renderFileItem).join("");
+  _dirItems = data.items;
+  box.innerHTML = data.items.map((it,i) => renderFileItem(it,i)).join("");
 }}
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
@@ -1140,7 +1170,8 @@ async function doSearch(){{
   const data = await res.json();
   if(!res.ok){{ err.textContent = data.error || "Error"; box.innerHTML=""; return; }}
   err.textContent = `Found: ${{data.results.length}}`;
-  box.innerHTML = data.results.map(renderFileItem).join("");
+  _searchItems = data.results;
+  box.innerHTML = data.results.map((it,i) => renderFileItem(it,i)).join("");
 }}
 
 const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_releasegroupid",
@@ -1297,6 +1328,61 @@ async function lastfm(){{
   el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
 }}
 
+let _dirItems = [], _searchItems = [];
+
+document.getElementById("dirList").addEventListener("click", function(e){{
+  const item = e.target.closest("[data-idx]");
+  if(!item) return;
+  const it = _dirItems[parseInt(item.dataset.idx, 10)];
+  if(!it) return;
+  if(it.type === "dir") openDir(it.path);
+  else openFile(it.path);
+}});
+
+document.getElementById("sList").addEventListener("click", function(e){{
+  const item = e.target.closest("[data-idx]");
+  if(!item) return;
+  const it = _searchItems[parseInt(item.dataset.idx, 10)];
+  if(!it) return;
+  openFile(it.path);
+}});
+
+document.getElementById("tagForm").addEventListener("submit", async function(e){{
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  if(e.submitter && e.submitter.name) fd.set(e.submitter.name, e.submitter.value);
+  try {{
+    const res = await fetch("/update", {{method:"POST", body:fd}});
+    const data = await res.json();
+    if(data.status === "ok") {{
+      let html = `<div style="color:#065f46;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x2705; Tags written successfully</div>`;
+      html += `<div><strong>Wrote to:</strong><br><span class="mono">${{esc(data.wrote_to)}}</span></div>`;
+      if(data.archived_to) {{
+        html += `<div style="margin-top:10px"><strong>Archived to:</strong><br><span class="mono">${{esc(data.archived_to)}}</span></div>`;
+        // Update path input to the new archived location; browse directory panel is unchanged
+        document.getElementById("path").value = data.archived_to;
+      }}
+      if(data.involved_people) html += `<div style="margin-top:8px"><strong>Involved people:</strong> ${{esc(data.involved_people)}}</div>`;
+      if(data.label) html += `<div><strong>Label:</strong> ${{esc(data.label)}}</div>`;
+      if(data.catalog_number) html += `<div><strong>Catalog #:</strong> ${{esc(data.catalog_number)}}</div>`;
+      showModal(html);
+    }} else {{
+      showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x274C; Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
+    }}
+  }} catch(err) {{
+    showModal(`<div style="color:#991b1b">&#x274C; Network error: ${{esc(err.message)}}</div>`);
+  }}
+}});
+
+function showModal(html) {{
+  document.getElementById("resultModalBody").innerHTML = html;
+  document.getElementById("resultModal").classList.add("open");
+}}
+
+function closeModal() {{
+  document.getElementById("resultModal").classList.remove("open");
+}}
+
 loadDir();
 </script>
 </body>
@@ -1329,15 +1415,16 @@ def update():
         if action == "archive":
             archived_to = archive_mp3(path)
 
-        msg = f"OK ✅\nWrote tags to:\n{path}\n\n"
-        if archived_to:
-            msg += f"Archived to:\n{archived_to}\n\n"
-        msg += f"Involved people list: {normalize_involved_people(fields.get('involved_people_list',''))}\n"
-        msg += f"Label: {fields.get('label','')}\n"
-        msg += f"Catalog #: {fields.get('catalog_number','')}\n"
-        return f"<pre>{msg}</pre><p><a href='/?path={requests.utils.quote(path)}'>Back</a></p>"
+        return jsonify({
+            "status": "ok",
+            "wrote_to": path,
+            "archived_to": archived_to,
+            "involved_people": normalize_involved_people(fields.get('involved_people_list', '')),
+            "label": fields.get('label', ''),
+            "catalog_number": fields.get('catalog_number', ''),
+        })
     except Exception as e:
-        return f"<pre>ERROR ❌\n{e}\n</pre><p><a href='/'>Back</a></p>", 400
+        return jsonify({"status": "error", "error": str(e)}), 400
 
 if __name__ == "__main__":
 
