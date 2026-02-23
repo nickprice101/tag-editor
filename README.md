@@ -23,13 +23,15 @@ services:
       # OPTIONAL: enable these lookups by adding keys/tokens
       - DISCOGS_TOKEN=xxxx
       - ACOUSTID_KEY=xxxx
-      - LASTFM_API_KEY=xxx
+      # No longer implemented as didn't add enough benefit.
+      #- LASTFM_API_KEY=xxx
 
     volumes:
       # App code + requirements live here on the NAS
       - /opt/beets/tag-editor:/app
 
       # Music library read/write (needed for tag writes + archive move)
+      # Paths should be the same inside and outside the container.
       - /mnt/HD/HD_a2/Media/Music:/mnt/HD/HD_a2/Media/Music
 
     ports:
