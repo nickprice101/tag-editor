@@ -826,7 +826,8 @@ def ui_home():
       margin-bottom: 16px;
       box-shadow: var(--shadow);
     }}
-    .row2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    .row2 {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }}
+    .row2 > * {{ min-width: 0; }}
     @media(max-width:700px){{ .row2 {{ grid-template-columns: 1fr; }} }}
     label {{ display: block; font-size: .85rem; font-weight: 600; margin-bottom: 4px; }}
     input[type=text], input:not([type]), textarea {{
@@ -874,8 +875,8 @@ def ui_home():
       flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 1.3rem;
     }}
     .file-meta {{ flex: 1; min-width: 0; }}
-    .file-name {{ font-weight: 600; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-    .file-path {{ font-size: .75rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }}
+    .file-name {{ font-weight: 600; font-size: .88rem; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
+    .file-path {{ font-size: .75rem; color: var(--muted); white-space: normal; overflow-wrap: anywhere; word-break: break-word; margin-top: 1px; }}
     .file-artist {{ font-size: .82rem; margin-top: 2px; }}
     .file-title-tag {{ font-size: .82rem; color: var(--muted); margin-top: 1px; }}
     .file-footer {{ display: flex; gap: 8px; margin-top: 3px; font-size: .78rem; }}
@@ -932,7 +933,7 @@ def ui_home():
 
 <div class="card">
   <h2>Edit Tags</h2>
-  <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">Genre/AlbumArtist/Album [Year]/</span>.</p>
+  <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">{MUSIC_ROOT}/Genre/AlbumArtist/Album [Year]/</span>.</p>
 
   <form method="POST" action="/update">
     <label>File path</label>
