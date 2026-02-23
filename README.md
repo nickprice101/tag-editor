@@ -2,6 +2,8 @@
 ID3 tag editor using acoustic ID, discogs and beatport lookups, and URL parser. 
 Includes filter and search functionality.
 
+Container stack setup below.
+
 ```
 services:
   tag-editor:
