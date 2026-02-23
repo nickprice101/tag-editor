@@ -138,8 +138,10 @@ def _similarity(a: str, b: str) -> float:
         return 0.0
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
-def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str) -> float:
-    """Returns a score 0–100 based on query/result similarity (60% title, 40% artist)."""
+def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
+                  year_q: str = "", res_year: str = "") -> float:
+    """Returns a score 0–100 based on query/result similarity (60% title, 40% artist).
+    Optionally boosts by up to 5 points for year match."""
     score = 0.0
     if title_q:
         score += _similarity(title_q, res_title) * 60
@@ -147,7 +149,46 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str) 
         score += _similarity(artist_q, res_artist) * 40
     if title_q and res_title and title_q.lower() == res_title.lower():
         score += 10
+    if year_q and res_year and year_q.isdigit() and res_year.isdigit():
+        diff = abs(int(year_q) - int(res_year))
+        if diff == 0:
+            score += 5
+        elif diff == 1:
+            score += 2
     return round(min(100.0, score), 1)
+
+
+_COMPILATION_ARTIST_RE = re.compile(
+    r'\bvarious(\s+artists?)?\b|\bv\.?/a\.?\b', re.IGNORECASE
+)
+
+_BANDCAMP_SCORE_BOOST = 3  # small preference boost for Bandcamp results
+
+def _compilation_penalty(artist: str, release_type: str = "", track_count: int = 0) -> float:
+    """Returns a penalty (negative float) when a result is detected as a compilation.
+
+    Rules:
+    - If artist matches a V/A pattern OR release_type contains 'compilation': -15 points.
+      - Additional -5 if track_count > 20, or -2 if track_count > 10.
+    - If not detected as compilation but track_count is very large (>30): -5 points.
+    - If nothing detected, returns 0 (no penalty).
+    """
+    norm = (artist or "").strip()
+    is_comp = (
+        bool(_COMPILATION_ARTIST_RE.search(norm))
+        or norm.lower() == "va"
+        or "compilation" in (release_type or "").lower()
+    )
+    if is_comp:
+        penalty = -15.0
+        if track_count > 20:
+            penalty -= 5.0
+        elif track_count > 10:
+            penalty -= 2.0
+        return penalty
+    if track_count > 30:
+        return -5.0
+    return 0.0
 
 def _normalize_tag(s: str) -> str:
     """Lowercase, strip punctuation, collapse whitespace for genre comparison."""
@@ -945,7 +986,7 @@ def api_parse_url():
     return jsonify({"fields": fields, "note": "Best-effort parse; verify before writing."})
 
 def _parse_web_search_results(site: str, search_url: str, html: str,
-                              artist_q: str, title_q: str) -> list:
+                              artist_q: str, title_q: str, year_q: str = "") -> list:
     """Best-effort extraction of track results from a search results page."""
     results = []
     soup = BeautifulSoup(html, "html.parser")
@@ -962,10 +1003,11 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 sub = subhead.get_text(strip=True)
                 artist = sub[3:] if sub.startswith("by ") else sub
             if t:
+                score = _score_result(artist_q, title_q, artist, t, year_q) + _BANDCAMP_SCORE_BOOST
                 results.append({
                     "source": "Bandcamp", "title": t, "artist": artist,
                     "url": item_url,
-                    "score": _score_result(artist_q, title_q, artist, t),
+                    "score": round(min(100.0, score), 1),
                 })
 
     elif site == "Juno":
@@ -979,10 +1021,13 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             if url and not url.startswith("http"):
                 url = "https://www.junodownload.com" + url
             if t:
+                # release_type/track_count not available from HTML; detect via artist name only
+                score = _score_result(artist_q, title_q, a, t, year_q) + \
+                        _compilation_penalty(a)
                 results.append({
                     "source": "Juno", "title": t, "artist": a,
                     "url": url or search_url,
-                    "score": _score_result(artist_q, title_q, a, t),
+                    "score": round(max(0.0, score), 1),
                 })
         # fallback: product heading
         if not results:
@@ -994,9 +1039,12 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 a = artist_el.get_text(strip=True) if artist_el else ""
                 url = ("https://www.junodownload.com" + link_el["href"]) if link_el else search_url
                 if t:
+                    # release_type/track_count not available from HTML; detect via artist name only
+                    score = _score_result(artist_q, title_q, a, t, year_q) + \
+                            _compilation_penalty(a)
                     results.append({
                         "source": "Juno", "title": t, "artist": a,
-                        "url": url, "score": _score_result(artist_q, title_q, a, t),
+                        "url": url, "score": round(max(0.0, score), 1),
                     })
 
     elif site == "Traxsource":
@@ -1008,9 +1056,12 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             a = artist_el.get_text(strip=True) if artist_el else ""
             url = ("https://www.traxsource.com" + link_el["href"]) if link_el else search_url
             if t:
+                # release_type/track_count not available from HTML; detect via artist name only
+                score = _score_result(artist_q, title_q, a, t, year_q) + \
+                        _compilation_penalty(a)
                 results.append({
                     "source": "Traxsource", "title": t, "artist": a,
-                    "url": url, "score": _score_result(artist_q, title_q, a, t),
+                    "url": url, "score": round(max(0.0, score), 1),
                 })
 
     elif site == "Beatport":
@@ -1030,10 +1081,20 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         slug = track.get("slug", "")
                         tid = track.get("id", "")
                         url = f"https://www.beatport.com/track/{slug}/{tid}" if slug else search_url
+                        # Extract year from release data
+                        release = track.get("release") or {}
+                        release_date = (release.get("new_release_date") or
+                                        track.get("new_release_date") or "")
+                        res_year = release_date[:4] if release_date and release_date[:4].isdigit() else ""
+                        # Compilation detection
+                        release_type = (release.get("type") or "").lower()
+                        track_count = int(release.get("track_count") or 0)
                         if t:
+                            score = _score_result(artist_q, title_q, a, t, year_q, res_year) + \
+                                    _compilation_penalty(a, release_type, track_count)
                             results.append({
                                 "source": "Beatport", "title": t, "artist": a,
-                                "url": url, "score": _score_result(artist_q, title_q, a, t),
+                                "url": url, "score": round(max(0.0, score), 1),
                             })
             except Exception:
                 pass
@@ -1057,6 +1118,7 @@ def api_web_search_stream():
         return require_basic_auth()
     artist = (request.args.get("artist") or "").strip()
     title = (request.args.get("title") or "").strip()
+    year = (request.args.get("year") or "").strip()
     q = (request.args.get("q") or "").strip() or f"{artist} {title}".strip()
 
     def generate():
@@ -1075,7 +1137,7 @@ def api_web_search_stream():
             yield sse_event("log", f"Searching {site_name}\u2026")
             try:
                 r = http_get(search_url, timeout=15)
-                found = _parse_web_search_results(site_name, search_url, r.text, artist, title)
+                found = _parse_web_search_results(site_name, search_url, r.text, artist, title, year)
                 all_results.extend(found)
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
             except Exception as exc:
@@ -2062,7 +2124,7 @@ function webSearch(){{
   if(!q){{ document.getElementById("webSearchResults").textContent = "Enter a search query or load a file first."; return; }}
   document.getElementById("webSearchResults").innerHTML = "";
   startStream("webSearch",
-    `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}`,
+    `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}`,
     function(data){{
       const el = document.getElementById("webSearchResults");
       if(!data.results || !data.results.length){{ el.textContent = "No results found."; return; }}
