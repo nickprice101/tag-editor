@@ -433,17 +433,55 @@ def api_art():
         return require_basic_auth()
     try:
         path = safe_path(request.args.get("path", ""))
+        full = request.args.get("full", "0") == "1"
         tags = ID3(path)
         pics = tags.getall("APIC")
         if not pics:
             return Response(status=404)
         data = pics[0].data
         im = Image.open(BytesIO(data)).convert("RGB")
-        im.thumbnail((80, 80), Image.LANCZOS)
+        if not full:
+            im.thumbnail((80, 80), Image.LANCZOS)
         out = BytesIO()
-        im.save(out, format="JPEG", quality=75)
+        quality = 90 if full else 75
+        im.save(out, format="JPEG", quality=quality)
         return Response(out.getvalue(), mimetype="image/jpeg",
                         headers={"Cache-Control": "max-age=3600"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/art_meta", methods=["GET"])
+def api_art_meta():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        path = safe_path(request.args.get("path", ""))
+        tags = ID3(path)
+        pics = tags.getall("APIC")
+        if not pics:
+            return jsonify({"has_art": False})
+        im = Image.open(BytesIO(pics[0].data))
+        w, h = im.size
+        return jsonify({"has_art": True, "width": w, "height": h})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/url_dim", methods=["GET"])
+def api_url_dim():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "Provide a URL."}), 400
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return jsonify({"error": "Only http/https URLs are supported."}), 400
+    try:
+        r = http_get(url, timeout=15)
+        r.raise_for_status()
+        im = Image.open(BytesIO(r.content))
+        w, h = im.size
+        return jsonify({"width": w, "height": h})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -473,10 +511,20 @@ def api_mb_search():
     for rec in data.get("recordings", []):
         ac = rec.get("artist-credit", [])
         artist_name = ac[0].get("name") if ac else ""
+        releases = rec.get("releases", []) or []
+        album = ""
+        albumartist = ""
+        if releases:
+            rel = releases[0]
+            album = rel.get("title", "") or ""
+            rel_ac = rel.get("artist-credit", []) or []
+            albumartist = rel_ac[0].get("name", "") if rel_ac else ""
         out.append({
             "id": rec.get("id", ""),
             "title": rec.get("title", ""),
             "artist": artist_name or "",
+            "album": album,
+            "albumartist": albumartist,
             "date": rec.get("first-release-date", "") or "",
         })
     return jsonify({"results": out})
@@ -531,6 +579,85 @@ def api_mb_resolve():
             "date": date,
             "year": date[:4] if date[:4].isdigit() else ""
         }})
+
+@app.route("/api/mb_recording", methods=["GET"])
+def api_mb_recording():
+    """Full Picard-field lookup for a recording MBID."""
+    if not basic_auth_ok():
+        return require_basic_auth()
+    rec_id = (request.args.get("id") or "").strip()
+    if not rec_id:
+        return jsonify({"error": "Provide a recording MBID."}), 400
+
+    r = requests.get(
+        f"https://musicbrainz.org/ws/2/recording/{rec_id}",
+        params={"fmt": "json", "inc": "releases+artist-credits+release-groups"},
+        timeout=25, headers=mb_headers()
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    title = data.get("title", "") or ""
+    ac = data.get("artist-credit", []) or []
+    artist = ac[0].get("name", "") if ac else ""
+    artist_obj = ac[0].get("artist", {}) if ac else {}
+    artist_id = artist_obj.get("id", "") if artist_obj else ""
+
+    date = data.get("first-release-date", "") or ""
+    year = date[:4] if date[:4].isdigit() else ""
+
+    releases = data.get("releases", []) or []
+    album = ""
+    albumartist = ""
+    albumartist_id = ""
+    release_id = ""
+    release_group_id = ""
+    release_country = ""
+    release_status = ""
+    release_type = ""
+    barcode = ""
+    asin = ""
+
+    if releases:
+        rel = releases[0]
+        album = rel.get("title", "") or ""
+        release_id = rel.get("id", "") or ""
+        release_country = rel.get("country", "") or ""
+        release_status = (rel.get("status") or "").lower()
+        barcode = rel.get("barcode", "") or ""
+        asin = rel.get("asin", "") or ""
+        rg = rel.get("release-group", {}) or {}
+        release_group_id = rg.get("id", "") or ""
+        release_type = (rg.get("primary-type") or "").lower()
+        rel_ac = rel.get("artist-credit", []) or []
+        albumartist = rel_ac[0].get("name", "") if rel_ac else ""
+        rel_artist_obj = rel_ac[0].get("artist", {}) if rel_ac else {}
+        albumartist_id = rel_artist_obj.get("id", "") if rel_artist_obj else ""
+
+    fields = {
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "albumartist": albumartist,
+        "date": date,
+        "year": year,
+        "musicbrainz_trackid": rec_id,
+        "musicbrainz_albumid": release_id,
+        "musicbrainz_releasegroupid": release_group_id,
+        "musicbrainz_artistid": artist_id,
+        "musicbrainz_albumartistid": albumartist_id,
+        "musicbrainz_releasecountry": release_country,
+        "musicbrainz_releasestatus": release_status,
+        "musicbrainz_releasetype": release_type,
+        "musicbrainz_albumtype": release_type,
+        "musicbrainz_albumstatus": release_status,
+        "musicbrainz_albumartist": albumartist,
+        "musicbrainz_artist": artist,
+        "musicbrainz_album": album,
+        "barcode": barcode,
+        "asin": asin,
+    }
+    return jsonify({"fields": {k: v for k, v in fields.items() if v}})
 
 # ----- Discogs (search + release + tracklist picker) -----
 @app.route("/api/discogs_search", methods=["GET"])
@@ -1205,6 +1332,10 @@ def ui_home():
     <input name="path" id="path" value="{path}"/>
     <button type="button" class="btn" onclick="loadTags()">Load existing tags &amp; audio info</button>
     <div id="loadMsg" class="hint"></div>
+    <div id="artPreview" style="display:none;margin:10px 0;gap:12px;align-items:flex-start">
+      <img id="artImg" src="" style="max-width:180px;max-height:180px;border-radius:8px;cursor:pointer" alt="Embedded artwork" onclick="showImageModal(this.src)"/>
+      <span id="artDims" class="hint" style="margin-top:4px"></span>
+    </div>
 
     <hr class="section-sep"/>
 
@@ -1213,8 +1344,6 @@ def ui_home():
       <div class="row2">
         <div>
           <button type="button" class="btn btn-outline" onclick="mbSearch()">MusicBrainz Search</button>
-          <input id="mbref" placeholder="Paste MusicBrainz URL or MBID"/>
-          <button type="button" class="btn btn-outline" onclick="mbResolve()">Resolve MB URL/MBID</button>
           <div id="mbResults"></div>
         </div>
         <div>
@@ -1238,6 +1367,7 @@ def ui_home():
           <div id="acoustidStatus" class="stream-status"></div>
           <p class="sub">Needs ACOUSTID_KEY env.</p>
           <div id="acoustidResults"></div>
+          <div id="acoustidMbStatus" class="hint"></div>
           <button type="button" class="btn btn-outline" onclick="lastfm()">Last.fm Genre Suggest</button>
           <div id="lastfmStatus" class="stream-status"></div>
           <p class="sub">Needs LASTFM_API_KEY env.</p>
@@ -1304,7 +1434,11 @@ def ui_home():
       </div>
       <div class="field-group">
         <label>Cover art image URL</label>
-        <input name="art_url" placeholder="https://.../cover.jpg (embedded as JPEG)"/>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+          <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="flex:1;margin-bottom:0" onblur="checkArtUrlDim()"/>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="copyArtUrl()" title="Copy URL">&#128203;</button>
+        </div>
+        <div id="artUrlDims" class="hint"></div>
       </div>
     </div>
 
@@ -1440,6 +1574,20 @@ async function loadTags(){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   msg.textContent = `Loaded. Art: ${{data.has_art ? "✅ Yes" : "❌ No"}} | ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
+  const artPrev = document.getElementById("artPreview");
+  const artImg = document.getElementById("artImg");
+  const artDims = document.getElementById("artDims");
+  if(data.has_art){{
+    artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1`;
+    artPrev.style.display = "flex";
+    fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}`).then(r=>r.json()).then(m=>{{
+      if(m.width) artDims.textContent = `${{m.width}}\u00d7${{m.height}}`;
+    }}).catch(()=>{{}});
+  }} else {{
+    artPrev.style.display = "none";
+    artImg.src = "";
+    artDims.textContent = "";
+  }}
 }}
 
 async function mbSearch(){{
@@ -1453,25 +1601,20 @@ async function mbSearch(){{
   el.innerHTML = data.results.map((r,i)=>`
     <div class="result-item">
       <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
+      ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` \u2014 ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
       <button type="button" class="btn btn-sm" onclick="applyMB(${{i}})">Use</button>
       <div class="hint mono">MBID: ${{esc(r.id)}}</div>
     </div>`).join("");
 }}
-function applyMB(i){{
-  const r = window._mb[i]; if(!r) return;
-  setField("title", r.title); setField("artist", r.artist);
-  if(r.date){{ setField("date", r.date); if(r.date.slice(0,4).match(/^\\d{{4}}$/)) setField("year", r.date.slice(0,4)); }}
-}}
-
-async function mbResolve(){{
-  const ref = document.getElementById("mbref").value.trim();
-  const el = document.getElementById("mbResults");
-  el.textContent = "Resolving…";
-  const res = await fetch(`/api/mb_resolve?ref=${{encodeURIComponent(ref)}}`);
+async function applyMB(i){{
+  const r = window._mb[i]; if(!r || !r.id) return;
+  document.getElementById("mbResults").insertAdjacentHTML("beforeend",`<div class="hint" id="_mbApplyMsg">Fetching full MB data\u2026</div>`);
+  const res = await fetch(`/api/mb_recording?id=${{encodeURIComponent(r.id)}}`);
   const data = await res.json();
-  if(!data.fields){{ el.textContent = data.error || "Error"; return; }}
+  const st = document.getElementById("_mbApplyMsg");
+  if(!data.fields){{ if(st) st.textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
-  el.textContent = "Applied fields from MusicBrainz.";
+  if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
 }}
 
 const _MAX_SSE_DATA = 3000;
@@ -1525,7 +1668,7 @@ function discogsSearch() {{
           <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
           <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
           <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
-          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle">` : ""}}
+          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;margin-left:8px;vertical-align:middle;cursor:pointer" onclick="showImageModal(this.src)" title="Click to enlarge">` : ""}}
         </div>`).join("");
     }}
   );
@@ -1539,6 +1682,7 @@ function discogsUse(i) {{
       if (!data.fields) {{ document.getElementById("discogsResults").textContent = data.error || "Error"; return; }}
       for(const [k,v] of Object.entries(data.fields)) setField(k, v);
       document.getElementById("discogsResults").textContent = "Applied fields from Discogs. Pick a track below (optional).";
+      checkArtUrlDim();
       const list = data.tracklist || [];
       const tl = document.getElementById("discogsTracklist");
       tl.innerHTML = list.length ? `<div class="result-item"><strong>Tracklist</strong><br>` +
@@ -1567,7 +1711,10 @@ async function parseUrl(){{
   const data = await res.json();
   if(!data.fields){{ el.textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
-  el.textContent = data.note || "Applied parsed fields (verify!)";
+  checkArtUrlDim();
+  let noteHtml = esc(data.note || "Applied parsed fields (verify!)");
+  if(data.fields.art_url) noteHtml += `<br><img src="${{esc(data.fields.art_url)}}" style="max-height:80px;border-radius:6px;margin-top:6px;cursor:pointer" onclick="showImageModal(this.src)" title="Click to enlarge">`;
+  el.innerHTML = noteHtml;
 }}
 
 async function beatportSearch(){{
@@ -1604,8 +1751,13 @@ function acoustid() {{
 }}
 async function useAcoustID(i){{
   const r = window._ac[i]; if(!r || !r.recording_id) return;
-  document.getElementById("mbref").value = `https://musicbrainz.org/recording/${{r.recording_id}}`;
-  await mbResolve();
+  const st = document.getElementById("acoustidMbStatus");
+  if(st) st.textContent = "Resolving via MB\u2026";
+  const res = await fetch(`/api/mb_recording?id=${{encodeURIComponent(r.recording_id)}}`);
+  const data = await res.json();
+  if(!data.fields){{ if(st) st.textContent = data.error || "Error"; return; }}
+  for(const [k,v] of Object.entries(data.fields)) setField(k, v);
+  if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
 }}
 
 function lastfm() {{
@@ -1670,6 +1822,35 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
 function showModal(html) {{
   document.getElementById("resultModalBody").innerHTML = html;
   document.getElementById("resultModal").classList.add("open");
+}}
+
+function showImageModal(src) {{
+  const s = String(src || "");
+  if(!/^https?:\\/\\//i.test(s)) return;
+  showModal(`<img src="${{esc(s)}}" style="max-width:100%;border-radius:8px;display:block" alt=""/>`);
+}}
+
+function copyArtUrl() {{
+  const v = document.getElementById("art_url_field");
+  if(!v || !v.value.trim()) return;
+  navigator.clipboard.writeText(v.value.trim()).then(()=>{{
+    const d = document.getElementById("artUrlDims");
+    const prev = d ? d.textContent : "";
+    if(d) d.textContent = "Copied!";
+    setTimeout(()=>{{ if(d) d.textContent = prev; }}, 1500);
+  }}).catch(()=>{{}});
+}}
+
+async function checkArtUrlDim() {{
+  const v = document.getElementById("art_url_field");
+  const d = document.getElementById("artUrlDims");
+  if(!v || !v.value.trim()) {{ if(d) d.textContent = ""; return; }}
+  if(d) d.textContent = "Checking\u2026";
+  try {{
+    const res = await fetch(`/api/url_dim?url=${{encodeURIComponent(v.value.trim())}}`);
+    const data = await res.json();
+    if(d) d.textContent = data.width ? `${{data.width}}\u00d7${{data.height}}` : (data.error ? "" : "");
+  }} catch(e) {{ if(d) d.textContent = ""; }}
 }}
 
 function closeModal() {{
