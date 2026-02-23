@@ -25,7 +25,7 @@ DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "").strip()
 ACOUSTID_KEY = os.getenv("ACOUSTID_KEY", "").strip()
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "").strip()
 
-UA = "corsicanescape-mp3-tag-editor/2.0 (local NAS tool)"
+UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
 app = Flask(__name__)
 
@@ -1099,4 +1099,5 @@ def update():
         return f"<pre>ERROR ❌\n{e}\n</pre><p><a href='/'>Back</a></p>", 400
 
 if __name__ == "__main__":
+
     app.run(host="0.0.0.0", port=5010)
