@@ -11,23 +11,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload site via SCP
+      - name: Show files in repo (debug)
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Top-level files/folders:"
+          ls -la
+          echo "Find common web folders:"
+          for d in site dist public build www html; do
+            echo "---- $d ----"
+            ls -la "$d" 2>/dev/null || echo "(missing)"
+          done
+          echo "First 60 paths:"
+          find . -maxdepth 3 -type f | head -n 60
+
+      - name: Upload website files via SCP
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: 22
-          source: "site/*"
-          target: ${{ secrets.EDITOR_DEPLOY_PATH }}
+          source: "site/**"
+          target: ${{ secrets.DEPLOY_PATH }}
           strip_components: 1
-
-      - name: Restart Docker container
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: 22
-          script: |
-            docker restart ${{ secrets.EDITOR_CONTAINER_NAME }}
