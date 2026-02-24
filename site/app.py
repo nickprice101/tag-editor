@@ -5,6 +5,7 @@ import json
 import shutil
 import threading
 import time
+from datetime import date as dt_date
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
@@ -203,6 +204,40 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
                 score += 5
                 break
     return round(min(100.0, score), 1)
+
+
+def _beatport_date_proximity_score(date_q: str, release_date: str) -> tuple:
+    """Return (proximity_bonus, unlocks_perfect) for Beatport date scoring.
+
+    Compares the query date (date_q, YYYY-MM-DD) against Beatport's release_date
+    (YYYY-MM-DD) and returns extra points based on how close they are.
+
+    Proximity mapping:
+        0–30 days   → +5 points, unlocks_perfect = True
+        31–90 days  → +3 points, unlocks_perfect = False
+        91–365 days → +1 point,  unlocks_perfect = False
+        >365 days   → +0 points, unlocks_perfect = False
+
+    If either date is missing or unparsable returns (0, False).
+    """
+    if not date_q or not release_date:
+        return (0, False)
+    try:
+        # Accept YYYY-MM-DD; ignore time component if present
+        q_str = date_q[:10]
+        r_str = release_date[:10]
+        q_d = dt_date.fromisoformat(q_str)
+        r_d = dt_date.fromisoformat(r_str)
+        diff = abs((q_d - r_d).days)
+        if diff <= 30:
+            return (5, True)
+        if diff <= 90:
+            return (3, False)
+        if diff <= 365:
+            return (1, False)
+        return (0, False)
+    except (ValueError, TypeError):
+        return (0, False)
 
 
 _COMPILATION_ARTIST_RE = re.compile(
@@ -1189,7 +1224,7 @@ def _extract_beatport_data_array(html: str) -> list:
 
 def _parse_web_search_results(site: str, search_url: str, html: str,
                               artist_q: str, title_q: str, year_q: str = "",
-                              remix_tokens: list = None) -> list:
+                              date_q: str = "", remix_tokens: list = None) -> list:
     """Best-effort extraction of track results from a search results page."""
     results = []
     soup = BeautifulSoup(html, "html.parser")
@@ -1317,8 +1352,13 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         remixers = track.get("remixers") or []
                         remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
                         if t and slug:
+                            _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
-                                    _compilation_penalty(a, release_type, track_count)
+                                    _compilation_penalty(a, release_type, track_count) + \
+                                    _prox_bonus
+                            # A perfect 100 requires close date proximity; otherwise cap at 99.
+                            if not _prox_unlocks:
+                                score = min(99.0, score)
                             results.append({
                                 "source": "Beatport", "title": t, "artist": a,
                                 "url": url, "score": round(max(0.0, score), 1),
@@ -1396,10 +1436,15 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         label_str = label_data.get("label_name", "") or label_data.get("name", "")
                     else:
                         label_str = str(label_data) if label_data else ""
+                    _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                     score = (
                         _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens)
                         + _compilation_penalty(a)
+                        + _prox_bonus
                     )
+                    # A perfect 100 requires close date proximity; otherwise cap at 99.
+                    if not _prox_unlocks:
+                        score = min(99.0, score)
                     results.append({
                         "source": "Beatport", "title": t, "artist": a,
                         "url": url, "score": round(max(0.0, score), 1),
@@ -1423,7 +1468,9 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     "title": t,
                     "artist": "",
                     "url": search_url,
-                    "score": _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens),
+                    # No release_date available here; date proximity is (0, False),
+                    # so cap at 99 is consistent with the proximity-required-for-100 rule.
+                    "score": min(99.0, _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens)),
                     "note": "Parsed from og:title; click to search manually.",
                     "direct_url": False, "is_fallback": True,
                 })
@@ -1449,6 +1496,7 @@ def api_web_search_stream():
     artist = (request.args.get("artist") or "").strip()
     title = (request.args.get("title") or "").strip()
     year = (request.args.get("year") or "").strip()
+    date = (request.args.get("date") or "").strip()
     q = (request.args.get("q") or "").strip() or f"{artist} {title}".strip()
 
     # Normalise for query building and scoring
@@ -1473,7 +1521,7 @@ def api_web_search_stream():
                 r = http_get(search_url, timeout=15)
                 found = _parse_web_search_results(
                     site_name, search_url, r.text,
-                    norm_artist, norm_title, year, remix_tokens,
+                    norm_artist, norm_title, year, date, remix_tokens,
                 )
                 all_results.extend(found)
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
@@ -2507,7 +2555,7 @@ function webSearch(){{
   if(!q){{ document.getElementById("webSearchResults").textContent = "Enter a search query or load a file first."; return; }}
   document.getElementById("webSearchResults").innerHTML = "";
   startStream("webSearch",
-    `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}`,
+    `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}&date=${{encodeURIComponent(getField("date"))}}`,
     function(data){{
       const el = document.getElementById("webSearchResults");
       if(!data.results || !data.results.length){{ el.textContent = "No results found."; return; }}
@@ -2517,6 +2565,7 @@ function webSearch(){{
           <span style="background:#e5e7eb;border-radius:4px;padding:1px 7px;font-size:.76rem;font-weight:700">${{esc(r.source||"")}}</span>
           <strong style="margin-left:6px">${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
           ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
+          ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
           ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
           <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
             ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
