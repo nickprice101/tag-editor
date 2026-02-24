@@ -241,76 +241,7 @@ _COMPILATION_ARTIST_RE = re.compile(
 
 _BANDCAMP_SCORE_BOOST = 3  # small preference boost for Bandcamp results
 
-# ---------------------------------------------------------------------------
-# Bandcamp search: use the public autocomplete API instead of HTML scraping.
-# ---------------------------------------------------------------------------
-_BANDCAMP_CACHE_LOCK = threading.Lock()
-_BANDCAMP_CACHE: dict = {}          # key -> (timestamp, results_list)
-_BANDCAMP_CACHE_TTL = 300           # seconds
-_BANDCAMP_CACHE_MAX = 200           # max entries (LRU-evict oldest on overflow)
-_BANDCAMP_API_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 
-
-def _bandcamp_search(query: str, item_type: str = "t") -> tuple:
-    """Search Bandcamp via the public autocomplete API.
-
-    Returns ``(results, debug_info)`` where *results* is a list of raw result
-    dicts from the API response (possibly empty) and *debug_info* is a dict
-    with diagnostic keys: ``status``, ``content_type``, ``top_keys``,
-    ``error``, ``sample``.
-
-    Results are cached in-memory with a TTL to avoid hammering the endpoint.
-    Thread-safe.
-    """
-    cache_key = f"{item_type}:{query.lower().strip()}"
-    now = time.time()
-
-    # Check cache first
-    with _BANDCAMP_CACHE_LOCK:
-        entry = _BANDCAMP_CACHE.get(cache_key)
-        if entry is not None:
-            ts, cached_results, cached_debug = entry
-            if now - ts < _BANDCAMP_CACHE_TTL:
-                return cached_results, cached_debug
-
-    debug: dict = {"status": None, "content_type": None, "top_keys": [], "error": None, "sample": None}
-    results = []
-    try:
-        resp = requests.post(
-            _BANDCAMP_API_URL,
-            headers={
-                "User-Agent": UA,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Origin": "https://bandcamp.com",
-                "Referer": "https://bandcamp.com/search",
-            },
-            json={"search_text": query, "search_filter": item_type,
-                  "full_page": True, "fan_id": None},
-            timeout=10,
-        )
-        debug["status"] = resp.status_code
-        debug["content_type"] = resp.headers.get("Content-Type", "")
-        resp.raise_for_status()
-        data = resp.json()
-        debug["top_keys"] = list(data.keys()) if isinstance(data, dict) else []
-        # Bandcamp API may return results directly or nested under "auto"
-        auto = data.get("auto") or {}
-        results = auto.get("results") or data.get("results") or []
-        if not results:
-            # Log a small sample to help diagnose schema mismatches
-            debug["sample"] = str(data)[:300]
-    except Exception as exc:
-        debug["error"] = str(exc)[:200]
-
-    # Store in cache; evict oldest entry if at capacity
-    with _BANDCAMP_CACHE_LOCK:
-        if len(_BANDCAMP_CACHE) >= _BANDCAMP_CACHE_MAX:
-            oldest_key = min(_BANDCAMP_CACHE, key=lambda k: _BANDCAMP_CACHE[k][0])
-            del _BANDCAMP_CACHE[oldest_key]
-        _BANDCAMP_CACHE[cache_key] = (now, results, debug)
-
-    return results, debug
 
 
 def _compilation_penalty(artist: str, release_type: str = "", track_count: int = 0) -> float:
@@ -1289,34 +1220,6 @@ def _extract_beatport_data_array(html: str) -> list:
         return []
 
 
-def _parse_bandcamp_api_results(api_results: list, search_url: str,
-                                artist_q: str, title_q: str, year_q: str = "",
-                                remix_tokens: list = None) -> list:
-    """Parse Bandcamp autocomplete API result dicts into normalized result dicts."""
-    results = []
-    for item in api_results:
-        if (item.get("type") or "") not in ("", "t"):
-            continue
-        t = item.get("name") or ""
-        artist = item.get("band_name") or ""
-        item_url = item.get("url") or ""
-        thumb = item.get("img") or ""
-        if t and item_url:
-            score = (_score_result(artist_q, title_q, artist, t, year_q,
-                                   remix_tokens=remix_tokens)
-                     + _BANDCAMP_SCORE_BOOST)
-            entry = {
-                "source": "Bandcamp", "title": t, "artist": artist,
-                "url": item_url,
-                "score": round(min(100.0, score), 1),
-                "direct_url": True, "is_fallback": False,
-            }
-            if thumb:
-                entry["thumb"] = thumb
-            results.append(entry)
-    return results
-
-
 def _parse_web_search_results(site: str, search_url: str, html: str,
                               artist_q: str, title_q: str, year_q: str = "",
                               date_q: str = "", remix_tokens: list = None) -> list:
@@ -1325,7 +1228,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
     soup = BeautifulSoup(html, "html.parser")
 
     if site == "Bandcamp":
-        # Fallback HTML parser (used only when API is unavailable)
+        # HTML scraping of Bandcamp's public search page
         for item in soup.find_all("li", class_=re.compile(r"searchresult")):
             heading = item.find(class_="heading")
             subhead = item.find(class_="subhead")
@@ -1728,31 +1631,14 @@ def api_web_search_stream():
                 sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
                 if deduped else found[:1]
             )
-        # Bandcamp: use the public autocomplete API instead of scraping HTML
+        # Bandcamp: scrape the public search page HTML
         yield sse_event("log", "Searching Bandcamp\u2026")
         try:
-            bc_raw, bc_debug = _bandcamp_search(norm_q)
-            if bc_debug.get("status") is not None:
-                yield sse_event("log", f"Bandcamp API: HTTP {bc_debug['status']}, "
-                                       f"content-type={bc_debug.get('content_type', '')!r}")
-            if bc_debug.get("error"):
-                yield sse_event("log", f"Bandcamp API error: {bc_debug['error']}")
-            if bc_raw:
-                found = _parse_bandcamp_api_results(
-                    bc_raw, bandcamp_search_url,
-                    norm_artist, norm_title, year, remix_tokens=remix_tokens,
-                )
-            else:
-                if bc_debug.get("top_keys"):
-                    yield sse_event("log", f"Bandcamp API top-level keys: {bc_debug['top_keys']}")
-                if bc_debug.get("sample"):
-                    yield sse_event("log", f"Bandcamp API sample: {bc_debug['sample'][:200]}")
-                # Fall back to HTML scraping if API returned nothing
-                r = http_get(bandcamp_search_url, timeout=15)
-                found = _parse_web_search_results(
-                    "Bandcamp", bandcamp_search_url, r.text,
-                    norm_artist, norm_title, year, date, remix_tokens,
-                )
+            r = http_get(bandcamp_search_url, timeout=15)
+            found = _parse_web_search_results(
+                "Bandcamp", bandcamp_search_url, r.text,
+                norm_artist, norm_title, year, date, remix_tokens,
+            )
             yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
         except Exception as exc:
             yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")
@@ -1936,6 +1822,7 @@ def api_discogs_search_stream():
                     "cover_image": it.get("cover_image", ""),
                     "catno": it.get("catno", ""),
                     "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
+                    "uri": it.get("uri", ""),
                 })
             yield sse_event("log", f"Found {len(results)} result(s).")
             yield sse_event("result", json.dumps({"results": results}))
@@ -2813,8 +2700,9 @@ function discogsSearch() {{
           <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
+            ${{r.uri ? `<a href="${{esc(r.uri)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
             ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(r.cover_image||r.thumb)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
-            ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="max-height:50px;border-radius:6px;cursor:pointer;vertical-align:middle" onclick="showImageModal('${{esc(r.cover_image||r.thumb)}}')" title="Click to enlarge">` : ""}}
+            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal(\''+esc(r.cover_image||r.thumb)+'\')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'\u00d7\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           </div>
         </div>`).join("");
     }}
@@ -2883,7 +2771,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="float:right;max-height:52px;max-width:52px;border-radius:4px;margin-left:8px;object-fit:cover" onerror="this.style.display='none'" loading="lazy">` : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block'+(r.source==='Beatport'?';cursor:pointer':'')+'" onerror="this.parentNode.style.display=\'none\'" loading="lazy" '+(r.source==='Beatport'?'onclick="showImageModal(\''+esc(r.thumb)+'\')" ':'')+' onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'\u00d7\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
@@ -2891,6 +2779,7 @@ function webSearch(){{
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
+              ${{r.source==='Beatport' && r.thumb ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\''+esc(r.thumb)+'\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
               <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
