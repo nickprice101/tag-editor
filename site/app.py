@@ -1071,7 +1071,12 @@ def api_parse_url():
     if not url:
         return jsonify({"error": "Provide a URL."}), 400
 
-    host = urlparse(url).netloc.lower()
+    parsed_u = urlparse(url)
+    qs = parse_qs(parsed_u.query)
+    if "/search" in parsed_u.path or any(k in qs for k in ("q", "term", "keywords")):
+        return jsonify({"error": "This looks like a search page URL, not a direct track/product link. Open it manually instead."}), 400
+
+    host = parsed_u.netloc.lower()
     r = http_get(url, timeout=25)
     r.raise_for_status()
     html = r.text
@@ -1158,18 +1163,19 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             heading = item.find(class_="heading")
             subhead = item.find(class_="subhead")
             link_el = heading.find("a") if heading else None
-            item_url = link_el["href"] if link_el else search_url
+            item_url = link_el["href"] if link_el else None
             t = heading.get_text(strip=True) if heading else ""
             artist = ""
             if subhead:
                 sub = subhead.get_text(strip=True)
                 artist = sub[3:] if sub.startswith("by ") else sub
-            if t:
+            if t and item_url:
                 score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens) + _BANDCAMP_SCORE_BOOST
                 results.append({
                     "source": "Bandcamp", "title": t, "artist": artist,
                     "url": item_url,
                     "score": round(min(100.0, score), 1),
+                    "direct_url": True, "is_fallback": False,
                 })
 
     elif site == "Juno":
@@ -1180,16 +1186,17 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             link_el = item.find("a", href=True)
             t = title_el.get_text(strip=True) if title_el else ""
             a = artist_el.get_text(strip=True) if artist_el else ""
-            url = link_el["href"] if link_el else search_url
-            if url and not url.startswith("http"):
-                url = "https://www.junodownload.com" + url
-            if t:
+            raw_href = link_el["href"] if link_el else ""
+            if raw_href and not raw_href.startswith("http"):
+                raw_href = "https://www.junodownload.com" + raw_href
+            if t and raw_href:
                 score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
                 results.append({
                     "source": "Juno", "title": t, "artist": a,
-                    "url": url or search_url,
+                    "url": raw_href,
                     "score": round(max(0.0, score), 1),
+                    "direct_url": True, "is_fallback": False,
                 })
         # fallback: product heading
         if not results:
@@ -1199,13 +1206,14 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 artist_el = item.find("span", class_=re.compile(r"artist"))
                 t = title_el.get_text(strip=True) if title_el else ""
                 a = artist_el.get_text(strip=True) if artist_el else ""
-                url = ("https://www.junodownload.com" + link_el["href"]) if link_el else search_url
-                if t:
+                if t and link_el:
+                    url = "https://www.junodownload.com" + link_el["href"]
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                             _compilation_penalty(a)
                     results.append({
                         "source": "Juno", "title": t, "artist": a,
                         "url": url, "score": round(max(0.0, score), 1),
+                        "direct_url": True, "is_fallback": False,
                     })
 
     elif site == "Traxsource":
@@ -1215,14 +1223,15 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             link_el = item.find("a", href=re.compile(r"/title/"))
             t = title_el.get_text(strip=True) if title_el else ""
             a = artist_el.get_text(strip=True) if artist_el else ""
-            url = ("https://www.traxsource.com" + link_el["href"]) if link_el else search_url
-            if t:
+            if t and link_el:
+                url = "https://www.traxsource.com" + link_el["href"]
                 # release_type/track_count not available from HTML; detect via artist name only
                 score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
                 results.append({
                     "source": "Traxsource", "title": t, "artist": a,
                     "url": url, "score": round(max(0.0, score), 1),
+                    "direct_url": True, "is_fallback": False,
                 })
 
     elif site == "Beatport":
@@ -1271,7 +1280,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             label_str = str(label_data) if label_data else ""
                         remixers = track.get("remixers") or []
                         remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
-                        if t:
+                        if t and slug:
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
                                     _compilation_penalty(a, release_type, track_count)
                             results.append({
@@ -1283,6 +1292,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                                 "released": release_date,
                                 "label": label_str,
                                 "remixers": remixer_str,
+                                "direct_url": True, "is_fallback": False,
                             })
             except Exception:
                 pass
@@ -1298,6 +1308,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     "url": search_url,
                     "score": _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens),
                     "note": "Parsed from og:title; click to search manually.",
+                    "direct_url": False, "is_fallback": True,
                 })
 
     # If nothing structured was found, return the search URL as a fallback entry
@@ -1308,7 +1319,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             "artist": "",
             "url": search_url,
             "score": 0.0,
-            "note": "No structured results extracted; click to search manually.",
+            "note": "No structured results extracted; open manually.",
+            "direct_url": False, "is_fallback": True,
         })
     return results
 
@@ -2372,7 +2384,7 @@ function webSearch(){{
           ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
           <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
             ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
-            <button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>
+            ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
             <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
           </div>
           ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
@@ -2382,15 +2394,15 @@ function webSearch(){{
 }}
 async function applyWebResult(i){{
   const r = window._webResults[i]; if(!r) return;
+  if(!r.direct_url) {{
+    if(r.url) window.open(r.url,"_blank","noopener");
+    return;
+  }}
   // Prefill BPM and genre from search result if those fields are currently blank
   if(r.bpm && !getField("bpm")) setField("bpm", String(r.bpm));
   if(r.genre && !getField("genre")) setField("genre", r.genre);
-  if(r.url && !r.url.includes("?q=") && !r.url.includes("?term=") && !r.url.includes("/search")){{
-    document.getElementById("purl").value = r.url;
-    parseUrl();
-  }} else if(r.url){{
-    window.open(r.url,"_blank","noopener");
-  }}
+  document.getElementById("purl").value = r.url;
+  parseUrl();
 }}
 
 function acoustid() {{
