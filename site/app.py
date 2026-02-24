@@ -830,7 +830,7 @@ def api_mb_search_stream():
                     "thumb": thumb,
                 })
             yield sse_event("log", f"Found {len(out)} result(s).")
-            yield sse_event("result", json.dumps({"results": out}))
+            yield sse_event("result", json.dumps({"results": out}), allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1482,15 +1482,15 @@ def api_web_search_stream():
         all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         top = all_results[:10]
         yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
-        yield sse_event("result", json.dumps({"results": top}))
+        yield sse_event("result", json.dumps({"results": top}), allow_truncate=False)
 
     return sse_response(generate())
 
 # ----- SSE streaming helpers -----
 _MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if exceeded)
 
-def sse_event(event: str, data: str) -> str:
-    if len(data) > _MAX_SSE_DATA:
+def sse_event(event: str, data: str, allow_truncate: bool = True) -> str:
+    if allow_truncate and len(data) > _MAX_SSE_DATA:
         data = data[:_MAX_SSE_DATA] + "\u2026"
     data_lines = "\n".join(f"data: {line}" for line in data.split("\n"))
     return f"event: {event}\n{data_lines}\n\n"
@@ -1621,7 +1621,7 @@ def api_discogs_search_stream():
                     "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
                 })
             yield sse_event("log", f"Found {len(results)} result(s).")
-            yield sse_event("result", json.dumps({"results": results}))
+            yield sse_event("result", json.dumps({"results": results}), allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1677,7 +1677,7 @@ def api_discogs_release_stream():
                     "art_url": art_url,
                 },
                 "tracklist": tracklist,
-            }))
+            }), allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1730,7 +1730,7 @@ def api_acoustid_stream():
                 return
         out = list(islice(_parse_acoustid_response(results), 10))
         yield sse_event("log", f"Found {len(out)} match(es).")
-        yield sse_event("result", json.dumps({"results": out}))
+        yield sse_event("result", json.dumps({"results": out}), allow_truncate=False)
 
     return sse_response(generate())
 
@@ -2402,7 +2402,7 @@ function startStream(id, url, onResult) {{
     panel.insertAdjacentHTML("beforeend", '<div class="s-ok">\u2713 Done</div>');
     try {{ onResult(JSON.parse(e.data)); }}
     catch(err) {{
-      console.debug("[SSE result] parse error:", err.message, "len=", e.data.length, "tail=", e.data.slice(-200));
+      console.error("[SSE result] parse error:", err.message, "len=", e.data.length, "tail=", e.data.slice(-200));
       panel.insertAdjacentHTML("beforeend", `<div class="s-err">Parse error: ${{esc(err.message)}}</div>`);
     }}
   }});
