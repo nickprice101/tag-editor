@@ -34,3 +34,4 @@ jobs:
           source: "site/**"
           target: ${{ secrets.DEPLOY_PATH }}
           strip_components: 1
+          debug: true
