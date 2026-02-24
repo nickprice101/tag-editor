@@ -2702,7 +2702,7 @@ function discogsSearch() {{
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
             ${{r.uri ? `<a href="${{esc(r.uri)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
             ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(r.cover_image||r.thumb)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
-            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal(\''+esc(r.cover_image||r.thumb)+'\')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'\u00d7\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal(\\''+esc(r.cover_image||r.thumb)+'\\')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           </div>
         </div>`).join("");
     }}
@@ -2771,7 +2771,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block'+(r.source==='Beatport'?';cursor:pointer':'')+'" onerror="this.parentNode.style.display=\'none\'" loading="lazy" '+(r.source==='Beatport'?'onclick="showImageModal(\''+esc(r.thumb)+'\')" ':'')+' onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'\u00d7\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block'+(r.source==='Beatport'?';cursor:pointer':'')+'" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" '+(r.source==='Beatport'?'onclick="showImageModal(\\''+esc(r.thumb)+'\\')" ':'')+' onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
@@ -2779,7 +2779,7 @@ function webSearch(){{
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
-              ${{r.source==='Beatport' && r.thumb ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\''+esc(r.thumb)+'\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
+              ${{r.source==='Beatport' && r.thumb ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\\''+esc(r.thumb)+'\\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
               <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
