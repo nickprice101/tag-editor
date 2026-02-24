@@ -830,7 +830,9 @@ def api_mb_search_stream():
                     "thumb": thumb,
                 })
             yield sse_event("log", f"Found {len(out)} result(s).")
-            yield sse_event("result", json.dumps({"results": out}))
+            top_s = [_sanitize_result(x) if isinstance(x, dict) else x for x in out]
+            payload = json.dumps({"results": top_s}, ensure_ascii=False)
+            yield sse_event("result", payload, allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1482,18 +1484,42 @@ def api_web_search_stream():
         all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         top = all_results[:10]
         yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
-        yield sse_event("result", json.dumps({"results": top}))
+        top_s = [_sanitize_result(x) if isinstance(x, dict) else x for x in top]
+        payload = json.dumps({"results": top_s}, ensure_ascii=False)
+        yield sse_event("result", payload, allow_truncate=False)
 
     return sse_response(generate())
 
 # ----- SSE streaming helpers -----
 _MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if exceeded)
 
-def sse_event(event: str, data: str) -> str:
-    if len(data) > _MAX_SSE_DATA:
+def sse_event(event: str, data: str, *, allow_truncate: bool = True) -> str:
+    data = data or ""
+
+    if allow_truncate and len(data) > _MAX_SSE_DATA:
         data = data[:_MAX_SSE_DATA] + "\u2026"
-    data_lines = "\n".join(f"data: {line}" for line in data.split("\n"))
-    return f"event: {event}\n{data_lines}\n\n"
+
+    # SSE spec: each payload line must be prefixed with "data:"
+    lines = data.splitlines() or [""]
+    out = [f"event: {event}"]
+    out += [f"data: {line}" for line in lines]
+    out.append("")  # blank line terminates event
+    return "\n".join(out) + "\n"
+
+
+def _clamp_text(s: str, n: int = 400) -> str:
+    if not s:
+        return s or ""
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return s if len(s) <= n else s[:n] + "\u2026"
+
+
+def _sanitize_result(r: dict) -> dict:
+    rr = dict(r)
+    for k in ("snippet", "description", "summary", "text"):
+        if k in rr and isinstance(rr[k], str):
+            rr[k] = _clamp_text(rr[k], 400)
+    return rr
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -1621,7 +1647,9 @@ def api_discogs_search_stream():
                     "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
                 })
             yield sse_event("log", f"Found {len(results)} result(s).")
-            yield sse_event("result", json.dumps({"results": results}))
+            top_s = [_sanitize_result(x) if isinstance(x, dict) else x for x in results]
+            payload = json.dumps({"results": top_s}, ensure_ascii=False)
+            yield sse_event("result", payload, allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1667,7 +1695,7 @@ def api_discogs_release_stream():
                     "duration": t.get("duration", ""),
                 })
             yield sse_event("log", f"Got {len(tracklist)} track(s) in tracklist.")
-            yield sse_event("result", json.dumps({
+            payload = json.dumps({
                 "fields": {
                     "album": title,
                     "albumartist": albumartist,
@@ -1677,7 +1705,8 @@ def api_discogs_release_stream():
                     "art_url": art_url,
                 },
                 "tracklist": tracklist,
-            }))
+            }, ensure_ascii=False)
+            yield sse_event("result", payload, allow_truncate=False)
         except Exception as e:
             yield sse_event("apierror", str(e))
 
@@ -1730,7 +1759,9 @@ def api_acoustid_stream():
                 return
         out = list(islice(_parse_acoustid_response(results), 10))
         yield sse_event("log", f"Found {len(out)} match(es).")
-        yield sse_event("result", json.dumps({"results": out}))
+        top_s = [_sanitize_result(x) if isinstance(x, dict) else x for x in out]
+        payload = json.dumps({"results": top_s}, ensure_ascii=False)
+        yield sse_event("result", payload, allow_truncate=False)
 
     return sse_response(generate())
 
