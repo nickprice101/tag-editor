@@ -1482,18 +1482,33 @@ def api_web_search_stream():
         all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         top = all_results[:10]
         yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
-        yield sse_event("result", json.dumps({"results": top}))
+        yield sse_event("result", json.dumps({"results": _truncate_result_fields(top)}))
 
     return sse_response(generate())
 
 # ----- SSE streaming helpers -----
-_MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if exceeded)
+_MAX_SSE_LOG = 3000  # max chars for log/error messages (truncated with ellipsis if exceeded)
+_MAX_FIELD_LEN = 500  # max chars per string field before JSON encoding to prevent huge payloads
 
 def sse_event(event: str, data: str) -> str:
-    if len(data) > _MAX_SSE_DATA:
-        data = data[:_MAX_SSE_DATA] + "\u2026"
+    # Only truncate non-result events; result events always carry JSON and must not be cut mid-token.
+    if event != "result" and len(data) > _MAX_SSE_LOG:
+        data = data[:_MAX_SSE_LOG] + "\u2026"
     data_lines = "\n".join(f"data: {line}" for line in data.split("\n"))
     return f"event: {event}\n{data_lines}\n\n"
+
+def _truncate_result_fields(results: list) -> list:
+    """Truncate long string fields in result dicts before JSON encoding."""
+    truncated = []
+    for item in results:
+        entry = {}
+        for k, v in item.items():
+            if isinstance(v, str) and len(v) > _MAX_FIELD_LEN:
+                entry[k] = v[:_MAX_FIELD_LEN] + "\u2026"
+            else:
+                entry[k] = v
+        truncated.append(entry)
+    return truncated
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -2402,7 +2417,7 @@ function startStream(id, url, onResult) {{
     panel.insertAdjacentHTML("beforeend", '<div class="s-ok">\u2713 Done</div>');
     try {{ onResult(JSON.parse(e.data)); }}
     catch(err) {{
-      console.debug("[SSE result] parse error:", err.message, "len=", e.data.length, "tail=", e.data.slice(-200));
+      console.error("[SSE result] parse error:", err.message, "len=", e.data.length, "tail=", e.data.slice(-200));
       panel.insertAdjacentHTML("beforeend", `<div class="s-err">Parse error: ${{esc(err.message)}}</div>`);
     }}
   }});
