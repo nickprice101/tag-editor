@@ -1,37 +1,50 @@
-name: Deploy to StarbuckNAS
+name: Deploy website to StarbuckNAS + restart container
 
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch: {}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Show files in repo (debug)
+      # Writes your SSH private key from GitHub Secrets to a file on the runner,
+      # validates it parses, and pins the server host key (known_hosts).
+      - name: Setup SSH key
+        shell: bash
         run: |
-          echo "PWD: $(pwd)"
-          echo "Top-level files/folders:"
-          ls -la
-          echo "Find common web folders:"
-          for d in site dist public build www html; do
-            echo "---- $d ----"
-            ls -la "$d" 2>/dev/null || echo "(missing)"
-          done
-          echo "First 60 paths:"
-          find . -maxdepth 3 -type f | head -n 60
+          set -euo pipefail
+          mkdir -p ~/.ssh
+
+          # Write the key exactly as stored in the secret (multiline supported).
+          cat > ~/.ssh/id_ed25519 <<'EOF'
+${{ secrets.SSH_KEY }}
+EOF
+          chmod 600 ~/.ssh/id_ed25519
+
+          # Validate the key parses (fails fast if the secret is wrong)
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
+
+          # Add server host key to known_hosts to avoid interactive prompt
+          ssh-keyscan -p 22 -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Upload website files via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: 22
-          source: "site/**"
-          target: ${{ secrets.DEPLOY_PATH }}
-          strip_components: 1
-          debug: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Upload everything inside ./site to your DEPLOY_PATH on the NAS
+          scp -i ~/.ssh/id_ed25519 -P 22 -r site/* \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.EDITOR_DEPLOY_PATH }}/"
+
+      - name: Restart Docker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p 22 \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "docker restart '${{ secrets.EDITOR_CONTAINER_NAME }}'"
