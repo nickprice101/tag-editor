@@ -17,7 +17,7 @@ from flask import Flask, request, Response, jsonify
 from mutagen.id3 import (
     ID3, ID3NoHeaderError,
     TIT2, TPE1, TALB, TPE2, TCON, TRCK, TPUB, COMM, TDRC, TYER,
-    TXXX, TSOP, TSO2, APIC
+    TXXX, TSOP, TSO2, APIC, TBPM
 )
 from mutagen.mp3 import MP3
 from PIL import Image
@@ -393,6 +393,16 @@ def upsert_id3(mp3_path: str, fields: dict):
     set_text_frame(tags, TRCK, fields.get("track"))
     set_text_frame(tags, TPUB, fields.get("publisher"))
 
+    bpm_raw = (fields.get("bpm") or "").strip()
+    if bpm_raw:
+        try:
+            bpm_int = str(int(float(bpm_raw)))
+            tags.setall("TBPM", [TBPM(encoding=3, text=[bpm_int])])
+        except (ValueError, TypeError):
+            tags.delall("TBPM")
+    else:
+        tags.delall("TBPM")
+
     comment = (fields.get("comment") or "").strip()
     if comment:
         tags.setall("COMM", [COMM(encoding=3, lang="eng", desc="", text=[comment])])
@@ -478,6 +488,7 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "involved_people_list": get_txxx(tags, "involved_people_list"),
         "label": get_txxx(tags, "label"),
         "catalog_number": get_txxx(tags, "catalog_number"),
+        "bpm": get_text(tags, "TBPM"),
         "has_art": bool(tags.getall("APIC")),
         "length_seconds": float(getattr(mp3.info, "length", 0.0) or 0.0),
         "bitrate_kbps": int((getattr(mp3.info, "bitrate", 0) or 0) / 1000),
@@ -1239,12 +1250,39 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         # Compilation detection
                         release_type = (release.get("type") or "").lower()
                         track_count = int(release.get("track_count") or 0)
+                        # Extra fields
+                        bpm_val = track.get("bpm") or ""
+                        genres = track.get("genres") or track.get("genre") or []
+                        if isinstance(genres, list):
+                            genre_str = ", ".join(g.get("name", "") for g in genres if g.get("name"))
+                        elif isinstance(genres, dict):
+                            genre_str = genres.get("name", "")
+                        else:
+                            genre_str = ""
+                        key_data = track.get("key") or {}
+                        if isinstance(key_data, dict):
+                            key_str = key_data.get("name", "") or key_data.get("camelot", "")
+                        else:
+                            key_str = str(key_data) if key_data else ""
+                        label_data = release.get("label") or track.get("label") or {}
+                        if isinstance(label_data, dict):
+                            label_str = label_data.get("name", "")
+                        else:
+                            label_str = str(label_data) if label_data else ""
+                        remixers = track.get("remixers") or []
+                        remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
                         if t:
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
                                     _compilation_penalty(a, release_type, track_count)
                             results.append({
                                 "source": "Beatport", "title": t, "artist": a,
                                 "url": url, "score": round(max(0.0, score), 1),
+                                "genre": genre_str,
+                                "bpm": str(bpm_val) if bpm_val else "",
+                                "key": key_str,
+                                "released": release_date,
+                                "label": label_str,
+                                "remixers": remixer_str,
                             })
             except Exception:
                 pass
@@ -1875,6 +1913,10 @@ def ui_home():
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
+          <div class="field-group">
+            <label>BPM</label><input name="bpm" placeholder="(optional)"/>
+            <div class="hint">Stored as <span class="mono">TBPM</span> (decimals truncated to integer; non-numeric ignored)</div>
+          </div>
           <div class="field-group"><label>Publisher</label><input name="publisher"/></div>
           <div class="field-group"><label>Comment</label><textarea name="comment" rows="3"></textarea></div>
         </div>
@@ -1990,7 +2032,7 @@ let _baseline = {{}};
 function setBaseline(data) {{
   const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
     "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number","art_url",...MB_FIELDS];
+    "label","catalog_number","bpm","art_url",...MB_FIELDS];
   _baseline = {{}};
   for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
   document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
@@ -2106,7 +2148,7 @@ async function loadTags(){{
   if(!res.ok){{ msg.textContent = data.error || "Error"; return; }}
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
     "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number",...MB_FIELDS]){{
+    "label","catalog_number","bpm",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   setBaseline(data);
@@ -2327,6 +2369,7 @@ function webSearch(){{
           <span style="background:#e5e7eb;border-radius:4px;padding:1px 7px;font-size:.76rem;font-weight:700">${{esc(r.source||"")}}</span>
           <strong style="margin-left:6px">${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
           ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
+          ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
           <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
             ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
             <button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>
@@ -2339,6 +2382,9 @@ function webSearch(){{
 }}
 async function applyWebResult(i){{
   const r = window._webResults[i]; if(!r) return;
+  // Prefill BPM and genre from search result if those fields are currently blank
+  if(r.bpm && !getField("bpm")) setField("bpm", String(r.bpm));
+  if(r.genre && !getField("genre")) setField("genre", r.genre);
   if(r.url && !r.url.includes("?q=") && !r.url.includes("?term=") && !r.url.includes("/search")){{
     document.getElementById("purl").value = r.url;
     parseUrl();
@@ -2560,7 +2606,7 @@ async function revertTags() {{
   if(!res.ok) return;
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
     "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number","art_url",...MB_FIELDS]){{
+    "label","catalog_number","bpm","art_url",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   setBaseline(data);
@@ -2664,6 +2710,7 @@ def update():
             "title","artist","album","albumartist","involved_people_list",
             "date","genre","year","original_year","track","publisher","comment",
             "artist_sort","albumartist_sort","art_url","label","catalog_number",
+            "bpm",
             *MB_TXXX_FIELDS,
         ]}
 
