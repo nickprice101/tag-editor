@@ -274,7 +274,7 @@ def _bandcamp_search(query: str, item_type: str = "t") -> list:
             _BANDCAMP_API_URL,
             headers={"User-Agent": UA, "Content-Type": "application/json"},
             json={"search_text": query, "search_filter": item_type,
-                  "full_page": False, "fan_id": None},
+                  "full_page": True, "fan_id": None},
             timeout=10,
         )
         resp.raise_for_status()
@@ -1275,7 +1275,7 @@ def _parse_bandcamp_api_results(api_results: list, search_url: str,
     """Parse Bandcamp autocomplete API result dicts into normalized result dicts."""
     results = []
     for item in api_results:
-        if (item.get("type") or "") != "t":
+        if (item.get("type") or "") not in ("", "t"):
             continue
         t = item.get("name") or ""
         artist = item.get("band_name") or ""
@@ -1316,14 +1316,19 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             if subhead:
                 sub = subhead.get_text(strip=True)
                 artist = sub[3:] if sub.startswith("by ") else sub
+            img_el = item.find("img", src=True)
+            thumb = img_el["src"] if img_el else ""
             if t and item_url:
                 score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens) + _BANDCAMP_SCORE_BOOST
-                results.append({
+                entry = {
                     "source": "Bandcamp", "title": t, "artist": artist,
                     "url": item_url,
                     "score": round(min(100.0, score), 1),
                     "direct_url": True, "is_fallback": False,
-                })
+                }
+                if thumb:
+                    entry["thumb"] = thumb
+                results.append(entry)
 
     elif site == "Juno":
         # Primary: listing items with explicit artist/title elements
@@ -1331,55 +1336,70 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             title_el = item.find(class_=re.compile(r"juno-title|title"))
             artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
             link_el = item.find("a", href=True)
+            img_el = item.find("img", src=True)
             t = title_el.get_text(strip=True) if title_el else ""
             a = artist_el.get_text(strip=True) if artist_el else ""
             raw_href = link_el["href"] if link_el else ""
+            thumb = img_el["src"] if img_el else ""
             if raw_href and not raw_href.startswith("http"):
                 raw_href = "https://www.junodownload.com" + raw_href
             if t and raw_href:
                 score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
-                results.append({
+                entry = {
                     "source": "Juno", "title": t, "artist": a,
                     "url": raw_href,
                     "score": round(max(0.0, score), 1),
                     "direct_url": True, "is_fallback": False,
-                })
+                }
+                if thumb:
+                    entry["thumb"] = thumb
+                results.append(entry)
         # fallback: product heading
         if not results:
             for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
                 link_el = item.find("a", href=re.compile(r"/products/"))
                 title_el = item.find("span", class_=re.compile(r"title"))
                 artist_el = item.find("span", class_=re.compile(r"artist"))
+                img_el = item.find("img", src=True)
                 t = title_el.get_text(strip=True) if title_el else ""
                 a = artist_el.get_text(strip=True) if artist_el else ""
+                thumb = img_el["src"] if img_el else ""
                 if t and link_el:
                     url = "https://www.junodownload.com" + link_el["href"]
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                             _compilation_penalty(a)
-                    results.append({
+                    entry = {
                         "source": "Juno", "title": t, "artist": a,
                         "url": url, "score": round(max(0.0, score), 1),
                         "direct_url": True, "is_fallback": False,
-                    })
+                    }
+                    if thumb:
+                        entry["thumb"] = thumb
+                    results.append(entry)
 
     elif site == "Traxsource":
         for item in soup.find_all("li", class_=re.compile(r"trk-row")):
             title_el = item.find(class_="title")
             artist_el = item.find(class_=re.compile(r"artists?"))
             link_el = item.find("a", href=re.compile(r"/title/"))
+            img_el = item.find("img", src=True)
             t = title_el.get_text(strip=True) if title_el else ""
             a = artist_el.get_text(strip=True) if artist_el else ""
+            thumb = img_el["src"] if img_el else ""
             if t and link_el:
                 url = "https://www.traxsource.com" + link_el["href"]
                 # release_type/track_count not available from HTML; detect via artist name only
                 score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
                         _compilation_penalty(a)
-                results.append({
+                entry = {
                     "source": "Traxsource", "title": t, "artist": a,
                     "url": url, "score": round(max(0.0, score), 1),
                     "direct_url": True, "is_fallback": False,
-                })
+                }
+                if thumb:
+                    entry["thumb"] = thumb
+                results.append(entry)
 
     elif site == "Beatport":
         next_data = soup.find("script", id="__NEXT_DATA__")
@@ -1618,7 +1638,7 @@ def api_web_search_stream():
             ("Juno",        f"https://www.junodownload.com/search/?q[keywords]={qq}&solrorder=relevancy"),
         ]
         bandcamp_search_url = f"https://bandcamp.com/search?q={qq}&item_type=t"
-        all_results = []
+        results_by_source = {}
         for site_name, search_url in html_sites:
             yield sse_event("log", f"Searching {site_name}\u2026")
             try:
@@ -1627,10 +1647,20 @@ def api_web_search_stream():
                     site_name, search_url, r.text,
                     norm_artist, norm_title, year, date, remix_tokens,
                 )
-                all_results.extend(found)
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
             except Exception as exc:
                 yield sse_event("log", f"{site_name}: error \u2014 {str(exc)[:120]}")
+                found = [{"source": site_name, "title": f"View search results on {site_name}",
+                          "artist": "", "url": search_url, "score": 0.0,
+                          "note": "Search failed; open manually.",
+                          "direct_url": False, "is_fallback": True}]
+            non_fb = [x for x in found if not x.get("is_fallback")]
+            # De-duplicate within source by URL
+            deduped = _deduplicate_by_url(non_fb)
+            results_by_source[site_name] = (
+                sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
+                if deduped else found[:1]
+            )
         # Bandcamp: use the public autocomplete API instead of scraping HTML
         yield sse_event("log", "Searching Bandcamp\u2026")
         try:
@@ -1647,14 +1677,22 @@ def api_web_search_stream():
                     "Bandcamp", bandcamp_search_url, r.text,
                     norm_artist, norm_title, year, date, remix_tokens,
                 )
-            all_results.extend(found)
             yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
         except Exception as exc:
             yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")
-        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        top = all_results[:10]
-        yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
-        yield sse_event("result", json.dumps({"results": _truncate_result_fields(top)}))
+            found = [{"source": "Bandcamp", "title": "View search results on Bandcamp",
+                      "artist": "", "url": bandcamp_search_url, "score": 0.0,
+                      "note": "Search failed; open manually.",
+                      "direct_url": False, "is_fallback": True}]
+        non_fb = [x for x in found if not x.get("is_fallback")]
+        deduped = _deduplicate_by_url(non_fb)
+        results_by_source["Bandcamp"] = (
+            sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
+            if deduped else found[:1]
+        )
+        total = sum(len(v) for v in results_by_source.values())
+        yield sse_event("log", f"Total {total} results across {len(results_by_source)} sources")
+        yield sse_event("result", json.dumps({"results_by_source": _truncate_results_by_source(results_by_source)}))
 
     return sse_response(generate())
 
@@ -1681,6 +1719,22 @@ def _truncate_result_fields(results: list) -> list:
                 entry[k] = v
         truncated.append(entry)
     return truncated
+
+def _truncate_results_by_source(rbs: dict) -> dict:
+    """Truncate long string fields in a results_by_source dict before JSON encoding."""
+    return {source: _truncate_result_fields(results) for source, results in rbs.items()}
+
+def _deduplicate_by_url(results: list) -> list:
+    """Return results with duplicates (same URL) removed, preserving order."""
+    seen: set = set()
+    deduped = []
+    for x in results:
+        u = x.get("url", "")
+        if u and u in seen:
+            continue
+        seen.add(u)
+        deduped.append(x)
+    return deduped
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -2743,23 +2797,34 @@ function webSearch(){{
     `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}&date=${{encodeURIComponent(getField("date"))}}`,
     function(data){{
       const el = document.getElementById("webSearchResults");
-      if(!data.results || !data.results.length){{ el.textContent = "No results found."; return; }}
-      window._webResults = data.results;
-      el.innerHTML = data.results.map((r,i)=>`
-        <div class="result-item">
-          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="float:right;max-height:52px;max-width:52px;border-radius:4px;margin-left:8px;object-fit:cover" onerror="this.style.display='none'" loading="lazy">` : ""}}
-          <span style="background:#e5e7eb;border-radius:4px;padding:1px 7px;font-size:.76rem;font-weight:700">${{esc(r.source||"")}}</span>
-          <strong style="margin-left:6px">${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
-          ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
-          ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
-          ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
-          <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
-            ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
-            ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
-            <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
-          </div>
-          ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
-        </div>`).join("");
+      if(!data.results_by_source){{ el.textContent = "No results found."; return; }}
+      const sources = Object.keys(data.results_by_source);
+      if(!sources.length){{ el.textContent = "No results found."; return; }}
+      window._webResults = [];
+      el.innerHTML = sources.map(source => {{
+        const results = data.results_by_source[source] || [];
+        const itemsHtml = results.map(r => {{
+          const i = window._webResults.length;
+          window._webResults.push(r);
+          return `<div class="result-item">
+            ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="float:right;max-height:52px;max-width:52px;border-radius:4px;margin-left:8px;object-fit:cover" onerror="this.style.display='none'" loading="lazy">` : ""}}
+            <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
+            ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
+            ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
+            ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
+            <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
+              ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
+              ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
+              <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
+            </div>
+            ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
+          </div>`;
+        }}).join("");
+        return `<div style="margin-bottom:14px">
+          <div style="font-weight:700;font-size:.9rem;margin-bottom:5px;padding:3px 8px;background:#f3f4f6;border-radius:4px">${{esc(source)}}</div>
+          ${{itemsHtml || '<div class="hint" style="font-style:italic">No results.</div>'}}
+        </div>`;
+      }}).join("");
     }}
   );
 }}
