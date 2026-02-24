@@ -207,21 +207,19 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
 
 
 def _beatport_date_proximity_score(date_q: str, release_date: str) -> tuple:
-    """Return (proximity_bonus, unlocks_perfect) for Beatport date scoring.
+    """Return (proximity_score, unlocks_perfect) for Beatport date scoring.
 
     Compares the query date (date_q, YYYY-MM-DD) against Beatport's release_date
-    (YYYY-MM-DD) and returns extra points based on how close they are.
+    (YYYY-MM-DD) and returns a continuous real-valued score in [0.0, 10.0].
 
     Proximity mapping:
-        0–30 days   → +5 points, unlocks_perfect = True
-        31–90 days  → +3 points, unlocks_perfect = False
-        91–365 days → +1 point,  unlocks_perfect = False
-        >365 days   → +0 points, unlocks_perfect = False
+        0 days      → 10.0 points, unlocks_perfect = True
+        Linear decrease to 0.0 at 10 years (10 * 365.25 days); clamped at 0.
 
-    If either date is missing or unparsable returns (0, False).
+    If either date is missing or unparsable returns (0.0, False).
     """
     if not date_q or not release_date:
-        return (0, False)
+        return (0.0, False)
     try:
         # Accept YYYY-MM-DD; ignore time component if present
         q_str = date_q[:10]
@@ -229,15 +227,12 @@ def _beatport_date_proximity_score(date_q: str, release_date: str) -> tuple:
         q_d = dt_date.fromisoformat(q_str)
         r_d = dt_date.fromisoformat(r_str)
         diff = abs((q_d - r_d).days)
-        if diff <= 30:
-            return (5, True)
-        if diff <= 90:
-            return (3, False)
-        if diff <= 365:
-            return (1, False)
-        return (0, False)
+        max_days = 10 * 365.25
+        proximity = max(0.0, 10.0 * (1.0 - diff / max_days))
+        unlocks_perfect = (diff == 0)
+        return (proximity, unlocks_perfect)
     except (ValueError, TypeError):
-        return (0, False)
+        return (0.0, False)
 
 
 _COMPILATION_ARTIST_RE = re.compile(
@@ -1356,12 +1351,12 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
                                     _compilation_penalty(a, release_type, track_count) + \
                                     _prox_bonus
-                            # A perfect 100 requires close date proximity; otherwise cap at 99.
+                            # Perfect 100.0 only when exact date match; otherwise cap at 99.9
                             if not _prox_unlocks:
-                                score = min(99.0, score)
+                                score = min(99.9, score)
                             results.append({
                                 "source": "Beatport", "title": t, "artist": a,
-                                "url": url, "score": round(max(0.0, score), 1),
+                                "url": url, "score": round(max(0.0, score), 2),
                                 "genre": genre_str,
                                 "bpm": str(bpm_val) if bpm_val else "",
                                 "key": key_str,
@@ -1442,12 +1437,12 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         + _compilation_penalty(a)
                         + _prox_bonus
                     )
-                    # A perfect 100 requires close date proximity; otherwise cap at 99.
+                    # Perfect 100.0 only when exact date match; otherwise cap at 99.9
                     if not _prox_unlocks:
-                        score = min(99.0, score)
+                        score = min(99.9, score)
                     results.append({
                         "source": "Beatport", "title": t, "artist": a,
-                        "url": url, "score": round(max(0.0, score), 1),
+                        "url": url, "score": round(max(0.0, score), 2),
                         "genre": genre_str,
                         "bpm": str(bpm_val) if bpm_val else "",
                         "key": key_str,
@@ -2084,9 +2079,19 @@ def ui_home():
       <div class="row2">
         <div>
           <div class="field-group"><label>Title</label><input name="title"/></div>
-          <div class="field-group"><label>Artist</label><input name="artist"/></div>
+          <div class="field-group"><label>Artist</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input name="artist" style="flex:1;margin-bottom:0"/>
+              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is name?</label>
+            </div>
+          </div>
           <div class="field-group"><label>Album</label><input name="album"/></div>
-          <div class="field-group"><label>Album Artist (band)</label><input name="albumartist"/></div>
+          <div class="field-group"><label>Album Artist (band)</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input name="albumartist" style="flex:1;margin-bottom:0"/>
+              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is name?</label>
+            </div>
+          </div>
           <div class="field-group">
             <label>Involved people list</label>
             <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
@@ -2119,14 +2124,12 @@ def ui_home():
           <div class="field-group">
             <label>Artist sort</label><input name="artist_sort" placeholder="Beatles, The"/>
             <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
-            <label style="font-weight:400;font-size:.82rem"><input type="checkbox" name="auto_artist_sort" value="1" checked/> Auto-generate if blank</label>
           </div>
         </div>
         <div>
           <div class="field-group">
             <label>Album artist sort</label><input name="albumartist_sort" placeholder="Beatles, The"/>
             <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
-            <label style="font-weight:400;font-size:.82rem"><input type="checkbox" name="auto_albumartist_sort" value="1" checked/> Auto-generate if blank</label>
           </div>
         </div>
       </div>
@@ -2242,6 +2245,46 @@ function setField(name, val){{
 }}
 function getField(name){{ const el = document.querySelector(`[name="${{name}}"]`); return el ? el.value : ""; }}
 
+function sortName(name) {{
+  name = (name || "").trim();
+  if(!name) return "";
+  if(name.toLowerCase().startsWith("the ")) {{
+    const rest = name.substring(4).trim();
+    return rest ? rest + ", The" : name;
+  }}
+  return name;
+}}
+
+function isNameTransform(name) {{
+  name = (name || "").trim();
+  if(!name || name.includes(",")) return name;
+  const parts = name.split(/\s+/);
+  if(parts.length < 2) return name;
+  const given = parts[0];
+  const surname = parts.slice(1).join(" ");
+  return surname + ", " + given;
+}}
+
+function applyIsName(fieldName, sortFieldName, cb) {{
+  if(!cb.checked) return;
+  const el = document.querySelector(`[name="${{fieldName}}"]`);
+  if(!el || !el.value.trim()) {{ cb.checked = false; return; }}
+  el.value = isNameTransform(el.value);
+  if(fieldName in _baseline) {{
+    if(el.value !== (_baseline[fieldName] || "")) el.classList.add("dirty");
+    else el.classList.remove("dirty");
+  }}
+  // Also update the sort field if it is currently blank
+  const sortEl = document.querySelector(`[name="${{sortFieldName}}"]`);
+  if(sortEl && !sortEl.value.trim()) {{
+    sortEl.value = sortName(el.value);
+    if(sortFieldName in _baseline) {{
+      if(sortEl.value !== (_baseline[sortFieldName] || "")) sortEl.classList.add("dirty");
+      else sortEl.classList.remove("dirty");
+    }}
+  }}
+}}
+
 function renderFileItem(it, idx){{
   const noGenre = it.type === "file" && !it.genre;
   const genreBadge = it.type === "file"
@@ -2344,7 +2387,20 @@ async function loadTags(){{
     "label","catalog_number","bpm",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  setBaseline(data);
+  // Autopopulate label/publisher (only if blank)
+  const lv = getField("label"), pv = getField("publisher");
+  if(lv && !pv) {{ const el = document.querySelector('[name="publisher"]'); if(el) el.value = lv; }}
+  if(pv && !lv) {{ const el = document.querySelector('[name="label"]'); if(el) el.value = pv; }}
+  // Autopopulate year from date (only if year is blank)
+  const dv = getField("date"), yv = getField("year");
+  if(dv && !yv) {{ const el = document.querySelector('[name="year"]'); if(el) el.value = dv.substring(0,4); }}
+  // Autopopulate sort fields (only if blank)
+  const artV = getField("artist"), artSortV = getField("artist_sort");
+  if(artV && !artSortV) {{ const el = document.querySelector('[name="artist_sort"]'); if(el) el.value = sortName(artV); }}
+  const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
+  if(aaV && !aaSortV) {{ const el = document.querySelector('[name="albumartist_sort"]'); if(el) el.value = sortName(aaV); }}
+  // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
+  setBaseline(null);
   document.getElementById("genreSuggestions").innerHTML = "";
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
@@ -2806,7 +2862,19 @@ async function revertTags() {{
     "label","catalog_number","bpm","art_url",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  setBaseline(data);
+  // Autopopulate label/publisher (only if blank)
+  const lv = getField("label"), pv = getField("publisher");
+  if(lv && !pv) {{ const el = document.querySelector('[name="publisher"]'); if(el) el.value = lv; }}
+  if(pv && !lv) {{ const el = document.querySelector('[name="label"]'); if(el) el.value = pv; }}
+  // Autopopulate year from date (only if year is blank)
+  const dv = getField("date"), yv = getField("year");
+  if(dv && !yv) {{ const el = document.querySelector('[name="year"]'); if(el) el.value = dv.substring(0,4); }}
+  // Autopopulate sort fields (only if blank)
+  const artV = getField("artist"), artSortV = getField("artist_sort");
+  if(artV && !artSortV) {{ const el = document.querySelector('[name="artist_sort"]'); if(el) el.value = sortName(artV); }}
+  const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
+  if(aaV && !aaSortV) {{ const el = document.querySelector('[name="albumartist_sort"]'); if(el) el.value = sortName(aaV); }}
+  setBaseline(null);
   document.getElementById("mbResults").innerHTML = "";
   document.getElementById("discogsResults").innerHTML = "";
   document.getElementById("discogsTracklist").innerHTML = "";
@@ -2911,9 +2979,9 @@ def update():
             *MB_TXXX_FIELDS,
         ]}
 
-        if request.form.get("auto_artist_sort") and not fields["artist_sort"].strip():
+        if not fields["artist_sort"].strip():
             fields["artist_sort"] = sort_name(fields.get("artist",""))
-        if request.form.get("auto_albumartist_sort") and not fields["albumartist_sort"].strip():
+        if not fields["albumartist_sort"].strip():
             fields["albumartist_sort"] = sort_name(fields.get("albumartist",""))
 
         upsert_id3(path, fields)
