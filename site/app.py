@@ -251,10 +251,14 @@ _BANDCAMP_CACHE_MAX = 200           # max entries (LRU-evict oldest on overflow)
 _BANDCAMP_API_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 
 
-def _bandcamp_search(query: str, item_type: str = "t") -> list:
+def _bandcamp_search(query: str, item_type: str = "t") -> tuple:
     """Search Bandcamp via the public autocomplete API.
 
-    Returns a list of raw result dicts from the API response, or [] on error.
+    Returns ``(results, debug_info)`` where *results* is a list of raw result
+    dicts from the API response (possibly empty) and *debug_info* is a dict
+    with diagnostic keys: ``status``, ``content_type``, ``top_keys``,
+    ``error``, ``sample``.
+
     Results are cached in-memory with a TTL to avoid hammering the endpoint.
     Thread-safe.
     """
@@ -265,32 +269,48 @@ def _bandcamp_search(query: str, item_type: str = "t") -> list:
     with _BANDCAMP_CACHE_LOCK:
         entry = _BANDCAMP_CACHE.get(cache_key)
         if entry is not None:
-            ts, cached = entry
+            ts, cached_results, cached_debug = entry
             if now - ts < _BANDCAMP_CACHE_TTL:
-                return cached
+                return cached_results, cached_debug
 
+    debug: dict = {"status": None, "content_type": None, "top_keys": [], "error": None, "sample": None}
+    results = []
     try:
         resp = requests.post(
             _BANDCAMP_API_URL,
-            headers={"User-Agent": UA, "Content-Type": "application/json"},
+            headers={
+                "User-Agent": UA,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Origin": "https://bandcamp.com",
+                "Referer": "https://bandcamp.com/search",
+            },
             json={"search_text": query, "search_filter": item_type,
                   "full_page": True, "fan_id": None},
             timeout=10,
         )
+        debug["status"] = resp.status_code
+        debug["content_type"] = resp.headers.get("Content-Type", "")
         resp.raise_for_status()
         data = resp.json()
-        results = (data.get("auto") or {}).get("results") or []
-    except Exception:
-        results = []
+        debug["top_keys"] = list(data.keys()) if isinstance(data, dict) else []
+        # Bandcamp API may return results directly or nested under "auto"
+        auto = data.get("auto") or {}
+        results = auto.get("results") or data.get("results") or []
+        if not results:
+            # Log a small sample to help diagnose schema mismatches
+            debug["sample"] = str(data)[:300]
+    except Exception as exc:
+        debug["error"] = str(exc)[:200]
 
     # Store in cache; evict oldest entry if at capacity
     with _BANDCAMP_CACHE_LOCK:
         if len(_BANDCAMP_CACHE) >= _BANDCAMP_CACHE_MAX:
             oldest_key = min(_BANDCAMP_CACHE, key=lambda k: _BANDCAMP_CACHE[k][0])
             del _BANDCAMP_CACHE[oldest_key]
-        _BANDCAMP_CACHE[cache_key] = (now, results)
+        _BANDCAMP_CACHE[cache_key] = (now, results, debug)
 
-    return results
+    return results, debug
 
 
 def _compilation_penalty(artist: str, release_type: str = "", track_count: int = 0) -> float:
@@ -1331,15 +1351,23 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 results.append(entry)
 
     elif site == "Juno":
-        # Primary: listing items with explicit artist/title elements
-        for item in soup.find_all("div", class_=re.compile(r"jd-listing-item|track_search_results")):
-            title_el = item.find(class_=re.compile(r"juno-title|title"))
-            artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
-            link_el = item.find("a", href=True)
-            img_el = item.find("img", src=True)
-            t = title_el.get_text(strip=True) if title_el else ""
+        # Primary: productlist_widget_container structure (inspired by mattmurray/juno_crawler)
+        for container in soup.find_all("div", class_=re.compile(r"productlist_widget_container")):
+            title_el = container.find("div", class_=re.compile(r"productlist_widget_product_title"))
+            link_el = title_el.find("a", href=True) if title_el else None
+            artist_el = container.find("div", class_=re.compile(r"productlist_widget_product_artists"))
+            label_el = container.find("div", class_=re.compile(r"productlist_widget_product_label"))
+            img_el = container.find("img", src=True)
+            if link_el:
+                t = link_el.get_text(strip=True)
+                raw_href = link_el["href"]
+            elif title_el:
+                t = title_el.get_text(strip=True)
+                raw_href = ""
+            else:
+                t = ""
+                raw_href = ""
             a = artist_el.get_text(strip=True) if artist_el else ""
-            raw_href = link_el["href"] if link_el else ""
             thumb = img_el["src"] if img_el else ""
             if raw_href and not raw_href.startswith("http"):
                 raw_href = "https://www.junodownload.com" + raw_href
@@ -1355,6 +1383,31 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 if thumb:
                     entry["thumb"] = thumb
                 results.append(entry)
+        # Secondary: listing items with explicit artist/title elements
+        if not results:
+            for item in soup.find_all("div", class_=re.compile(r"jd-listing-item|track_search_results")):
+                title_el = item.find(class_=re.compile(r"juno-title|title"))
+                artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
+                link_el = item.find("a", href=True)
+                img_el = item.find("img", src=True)
+                t = title_el.get_text(strip=True) if title_el else ""
+                a = artist_el.get_text(strip=True) if artist_el else ""
+                raw_href = link_el["href"] if link_el else ""
+                thumb = img_el["src"] if img_el else ""
+                if raw_href and not raw_href.startswith("http"):
+                    raw_href = "https://www.junodownload.com" + raw_href
+                if t and raw_href:
+                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+                            _compilation_penalty(a)
+                    entry = {
+                        "source": "Juno", "title": t, "artist": a,
+                        "url": raw_href,
+                        "score": round(max(0.0, score), 1),
+                        "direct_url": True, "is_fallback": False,
+                    }
+                    if thumb:
+                        entry["thumb"] = thumb
+                    results.append(entry)
         # fallback: product heading
         if not results:
             for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
@@ -1447,7 +1500,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             label_str = str(label_data) if label_data else ""
                         remixers = track.get("remixers") or []
                         remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
-                        # Thumbnail: prefer track image, fall back to release image
+                        # Thumbnail: prefer track image, fall back to release image or URI fields
                         images = track.get("images") or release.get("images") or {}
                         if isinstance(images, dict):
                             thumb = (
@@ -1458,6 +1511,13 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             )
                         else:
                             thumb = track.get("image") or release.get("image") or ""
+                        if not thumb:
+                            thumb = (
+                                track.get("release_image_uri")
+                                or release.get("release_image_uri")
+                                or track.get("image_uri")
+                                or ""
+                            )
                         if t and slug:
                             _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
@@ -1557,6 +1617,13 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         )
                     else:
                         thumb = track.get("image") or ""
+                    if not thumb:
+                        thumb = (
+                            track.get("release_image_uri")
+                            or (track.get("release") or {}).get("release_image_uri")
+                            or track.get("image_uri")
+                            or ""
+                        )
                     _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                     score = (
                         _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens)
@@ -1664,13 +1731,22 @@ def api_web_search_stream():
         # Bandcamp: use the public autocomplete API instead of scraping HTML
         yield sse_event("log", "Searching Bandcamp\u2026")
         try:
-            bc_raw = _bandcamp_search(norm_q)
+            bc_raw, bc_debug = _bandcamp_search(norm_q)
+            if bc_debug.get("status") is not None:
+                yield sse_event("log", f"Bandcamp API: HTTP {bc_debug['status']}, "
+                                       f"content-type={bc_debug.get('content_type', '')!r}")
+            if bc_debug.get("error"):
+                yield sse_event("log", f"Bandcamp API error: {bc_debug['error']}")
             if bc_raw:
                 found = _parse_bandcamp_api_results(
                     bc_raw, bandcamp_search_url,
                     norm_artist, norm_title, year, remix_tokens=remix_tokens,
                 )
             else:
+                if bc_debug.get("top_keys"):
+                    yield sse_event("log", f"Bandcamp API top-level keys: {bc_debug['top_keys']}")
+                if bc_debug.get("sample"):
+                    yield sse_event("log", f"Bandcamp API sample: {bc_debug['sample'][:200]}")
                 # Fall back to HTML scraping if API returned nothing
                 r = http_get(bandcamp_search_url, timeout=15)
                 found = _parse_web_search_results(
