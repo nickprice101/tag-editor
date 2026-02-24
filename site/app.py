@@ -1492,7 +1492,8 @@ _MAX_SSE_DATA = 3000  # max bytes per SSE data line (truncated with ellipsis if 
 def sse_event(event: str, data: str) -> str:
     if len(data) > _MAX_SSE_DATA:
         data = data[:_MAX_SSE_DATA] + "\u2026"
-    return f"event: {event}\ndata: {data}\n\n"
+    data_lines = "\n".join(f"data: {line}" for line in data.split("\n"))
+    return f"event: {event}\n{data_lines}\n\n"
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -2400,7 +2401,10 @@ function startStream(id, url, onResult) {{
     es.close(); delete _streams[id];
     panel.insertAdjacentHTML("beforeend", '<div class="s-ok">\u2713 Done</div>');
     try {{ onResult(JSON.parse(e.data)); }}
-    catch(err) {{ panel.insertAdjacentHTML("beforeend", `<div class="s-err">Parse error: ${{esc(err.message)}}</div>`); }}
+    catch(err) {{
+      console.debug("[SSE result] parse error:", err.message, "len=", e.data.length, "tail=", e.data.slice(-200));
+      panel.insertAdjacentHTML("beforeend", `<div class="s-err">Parse error: ${{esc(err.message)}}</div>`);
+    }}
   }});
   es.addEventListener("apierror", function(e) {{
     es.close(); delete _streams[id];
