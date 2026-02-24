@@ -1151,6 +1151,42 @@ def api_parse_url():
     fields = {k: v for k, v in fields.items() if isinstance(v, str) and v.strip()}
     return jsonify({"fields": fields, "note": "Best-effort parse; verify before writing."})
 
+def _extract_beatport_data_array(html: str) -> list:
+    """Locate and extract the JSON array associated with the top-level ``"data"`` key
+    from raw Beatport HTML using bracket matching.  Returns the parsed list on success
+    or an empty list on any failure.
+
+    The function scans for the literal ``"data":[`` marker and then walks forward,
+    counting ``[`` / ``]`` to find the matching closing bracket.  This avoids
+    brittle full-JSON parsing while being resilient to large surrounding payloads.
+    """
+    marker = '"data":['
+    idx = html.find(marker)
+    if idx == -1:
+        return []
+    # Advance to the opening '[' of the array
+    start = idx + len(marker) - 1  # points at '['
+    depth = 0
+    end = start
+    for i in range(start, len(html)):
+        ch = html[i]
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == start:
+        return []
+    raw = html[start:end + 1]
+    try:
+        arr = json.loads(raw)
+        return arr if isinstance(arr, list) else []
+    except Exception:
+        return []
+
+
 def _parse_web_search_results(site: str, search_url: str, html: str,
                               artist_q: str, title_q: str, year_q: str = "",
                               remix_tokens: list = None) -> list:
@@ -1296,7 +1332,88 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             })
             except Exception:
                 pass
-        # Beatport fallback: try og:title/og:description if __NEXT_DATA__ yielded nothing
+        # Beatport secondary fallback: scan raw HTML for "data":[{...}] array
+        if not results:
+            try:
+                data_arr = _extract_beatport_data_array(html)
+                for track in data_arr[:10]:
+                    if not isinstance(track, dict):
+                        continue
+                    t = track.get("track_name", "") or ""
+                    if not t:
+                        continue
+                    artists = track.get("artists", []) or []
+                    if isinstance(artists, list):
+                        a = ", ".join(
+                            x.get("artist_name", "") for x in artists
+                            if isinstance(x, dict) and x.get("artist_name")
+                        )
+                    else:
+                        a = ""
+                    # URL: try to build a direct track URL from track_id / slug
+                    tid = track.get("track_id") or track.get("id") or ""
+                    slug = track.get("slug", "") or ""
+                    if tid and slug:
+                        url = f"https://www.beatport.com/track/{slug}/{tid}"
+                        direct_url = True
+                    elif tid:
+                        url = f"https://www.beatport.com/track/-/{tid}"
+                        direct_url = True
+                    else:
+                        url = search_url
+                        direct_url = False
+                    # Release date / year
+                    release_date = (
+                        track.get("release_date") or
+                        (track.get("release") or {}).get("release_date") or ""
+                    )
+                    res_year = release_date[:4] if release_date and release_date[:4].isdigit() else ""
+                    # BPM
+                    bpm_val = track.get("bpm") or ""
+                    # Key
+                    key_str = track.get("key_name") or ""
+                    if not key_str:
+                        key_data = track.get("key") or {}
+                        if isinstance(key_data, dict):
+                            key_str = key_data.get("name", "") or key_data.get("camelot", "")
+                        else:
+                            key_str = str(key_data) if key_data else ""
+                    # Genre
+                    genres = track.get("genre") or track.get("genres") or []
+                    if isinstance(genres, list):
+                        genre_str = ", ".join(
+                            g.get("genre_name", "") or g.get("name", "")
+                            for g in genres
+                            if isinstance(g, dict)
+                        )
+                    elif isinstance(genres, dict):
+                        genre_str = genres.get("genre_name", "") or genres.get("name", "")
+                    else:
+                        genre_str = ""
+                    # Label
+                    label_data = track.get("label") or {}
+                    if isinstance(label_data, dict):
+                        label_str = label_data.get("label_name", "") or label_data.get("name", "")
+                    else:
+                        label_str = str(label_data) if label_data else ""
+                    score = (
+                        _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens)
+                        + _compilation_penalty(a)
+                    )
+                    results.append({
+                        "source": "Beatport", "title": t, "artist": a,
+                        "url": url, "score": round(max(0.0, score), 1),
+                        "genre": genre_str,
+                        "bpm": str(bpm_val) if bpm_val else "",
+                        "key": key_str,
+                        "released": release_date,
+                        "label": label_str,
+                        "direct_url": direct_url, "is_fallback": False,
+                    })
+            except Exception:
+                pass
+
+        # Beatport final fallback: try og:title/og:description if still nothing
         if not results:
             og_title = soup.find("meta", property="og:title")
             if og_title and og_title.get("content"):
