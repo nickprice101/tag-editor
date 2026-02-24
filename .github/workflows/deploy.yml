@@ -2,7 +2,7 @@ name: Deploy website to StarbuckNAS + restart container
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch: {}
 
 jobs:
@@ -13,31 +13,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Writes your SSH private key from GitHub Secrets to a file on the runner,
-      # validates it parses, and pins the server host key (known_hosts).
       - name: Setup SSH key
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
 
-          # Write the key exactly as stored in the secret (multiline supported).
-          cat > ~/.ssh/id_ed25519 <<'EOF'
-${{ secrets.SSH_KEY }}
-EOF
+          # Write private key from base64 secret
+          echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-          # Validate the key parses (fails fast if the secret is wrong)
+          # Validate key parses (fails fast if secret is wrong)
           ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
 
-          # Add server host key to known_hosts to avoid interactive prompt
+          # Trust the host key (prevents interactive prompt)
           ssh-keyscan -p 22 -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Upload website files via SCP
         shell: bash
         run: |
           set -euo pipefail
-          # Upload everything inside ./site to your DEPLOY_PATH on the NAS
           scp -i ~/.ssh/id_ed25519 -P 22 -r site/* \
             "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.EDITOR_DEPLOY_PATH }}/"
 
