@@ -5,7 +5,7 @@ import json
 import shutil
 import threading
 import time
-from datetime import date as dt_date
+from datetime import date as dt_date, datetime as dt_datetime
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
@@ -1232,15 +1232,50 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
         for item in soup.find_all("li", class_=re.compile(r"searchresult")):
             heading = item.find(class_="heading")
             subhead = item.find(class_="subhead")
-            link_el = heading.find("a") if heading else None
-            item_url = link_el["href"] if link_el else None
+
+            # Prefer canonical URL from .itemurl; fall back to heading link
+            itemurl_el = item.find(class_="itemurl")
+            canonical_link = itemurl_el.find("a") if itemurl_el else None
+            item_url = canonical_link.get("href") if canonical_link else None
+            if not item_url:
+                heading_link = heading.find("a") if heading else None
+                item_url = heading_link.get("href") if heading_link else None
+
             t = heading.get_text(strip=True) if heading else ""
+
+            # Artist always from subhead "by ..." (use separator to handle inline elements)
             artist = ""
             if subhead:
-                sub = subhead.get_text(strip=True)
-                artist = sub[3:] if sub.startswith("by ") else sub
-            img_el = item.find("img", src=True)
-            thumb = img_el["src"] if img_el else ""
+                sub = subhead.get_text(separator=" ", strip=True).strip()
+                artist = sub[3:].strip() if sub.startswith("by ") else sub
+
+            # Thumbnail: support lazy-load attrs in addition to src
+            thumb = ""
+            art_el = item.find(class_="art")
+            img_el = art_el.find("img") if art_el else item.find("img")
+            if img_el:
+                for attr in ("src", "data-src", "data-original"):
+                    val = img_el.get(attr, "")
+                    if val and not val.startswith("data:"):
+                        thumb = val
+                        break
+                if not thumb:
+                    srcset = img_el.get("srcset", "")
+                    if srcset:
+                        thumb = srcset.split(",")[0].strip().split()[0]
+
+            # Optional: extract release date from .released
+            released = ""
+            released_el = item.find(class_="released")
+            if released_el:
+                released_raw = released_el.get_text(strip=True)
+                m = re.match(r"released\s+(.+)", released_raw, re.IGNORECASE)
+                if m:
+                    try:
+                        released = dt_datetime.strptime(m.group(1).strip(), "%B %d, %Y").strftime("%Y-%m-%d")
+                    except ValueError:
+                        released = m.group(1).strip()
+
             if t and item_url:
                 score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens) + _BANDCAMP_SCORE_BOOST
                 entry = {
@@ -1251,6 +1286,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 }
                 if thumb:
                     entry["thumb"] = thumb
+                if released:
+                    entry["released"] = released
                 results.append(entry)
 
     elif site == "Juno":
