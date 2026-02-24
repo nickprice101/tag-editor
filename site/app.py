@@ -241,6 +241,58 @@ _COMPILATION_ARTIST_RE = re.compile(
 
 _BANDCAMP_SCORE_BOOST = 3  # small preference boost for Bandcamp results
 
+# ---------------------------------------------------------------------------
+# Bandcamp search: use the public autocomplete API instead of HTML scraping.
+# ---------------------------------------------------------------------------
+_BANDCAMP_CACHE_LOCK = threading.Lock()
+_BANDCAMP_CACHE: dict = {}          # key -> (timestamp, results_list)
+_BANDCAMP_CACHE_TTL = 300           # seconds
+_BANDCAMP_CACHE_MAX = 200           # max entries (LRU-evict oldest on overflow)
+_BANDCAMP_API_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
+
+
+def _bandcamp_search(query: str, item_type: str = "t") -> list:
+    """Search Bandcamp via the public autocomplete API.
+
+    Returns a list of raw result dicts from the API response, or [] on error.
+    Results are cached in-memory with a TTL to avoid hammering the endpoint.
+    Thread-safe.
+    """
+    cache_key = f"{item_type}:{query.lower().strip()}"
+    now = time.time()
+
+    # Check cache first
+    with _BANDCAMP_CACHE_LOCK:
+        entry = _BANDCAMP_CACHE.get(cache_key)
+        if entry is not None:
+            ts, cached = entry
+            if now - ts < _BANDCAMP_CACHE_TTL:
+                return cached
+
+    try:
+        resp = requests.post(
+            _BANDCAMP_API_URL,
+            headers={"User-Agent": UA, "Content-Type": "application/json"},
+            json={"search_text": query, "search_filter": item_type,
+                  "full_page": False, "fan_id": None},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = (data.get("auto") or {}).get("results") or []
+    except Exception:
+        results = []
+
+    # Store in cache; evict oldest entry if at capacity
+    with _BANDCAMP_CACHE_LOCK:
+        if len(_BANDCAMP_CACHE) >= _BANDCAMP_CACHE_MAX:
+            oldest_key = min(_BANDCAMP_CACHE, key=lambda k: _BANDCAMP_CACHE[k][0])
+            del _BANDCAMP_CACHE[oldest_key]
+        _BANDCAMP_CACHE[cache_key] = (now, results)
+
+    return results
+
+
 def _compilation_penalty(artist: str, release_type: str = "", track_count: int = 0) -> float:
     """Returns a penalty (negative float) when a result is detected as a compilation.
 
@@ -1217,6 +1269,34 @@ def _extract_beatport_data_array(html: str) -> list:
         return []
 
 
+def _parse_bandcamp_api_results(api_results: list, search_url: str,
+                                artist_q: str, title_q: str, year_q: str = "",
+                                remix_tokens: list = None) -> list:
+    """Parse Bandcamp autocomplete API result dicts into normalized result dicts."""
+    results = []
+    for item in api_results:
+        if (item.get("type") or "") != "t":
+            continue
+        t = item.get("name") or ""
+        artist = item.get("band_name") or ""
+        item_url = item.get("url") or ""
+        thumb = item.get("img") or ""
+        if t and item_url:
+            score = (_score_result(artist_q, title_q, artist, t, year_q,
+                                   remix_tokens=remix_tokens)
+                     + _BANDCAMP_SCORE_BOOST)
+            entry = {
+                "source": "Bandcamp", "title": t, "artist": artist,
+                "url": item_url,
+                "score": round(min(100.0, score), 1),
+                "direct_url": True, "is_fallback": False,
+            }
+            if thumb:
+                entry["thumb"] = thumb
+            results.append(entry)
+    return results
+
+
 def _parse_web_search_results(site: str, search_url: str, html: str,
                               artist_q: str, title_q: str, year_q: str = "",
                               date_q: str = "", remix_tokens: list = None) -> list:
@@ -1225,6 +1305,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
     soup = BeautifulSoup(html, "html.parser")
 
     if site == "Bandcamp":
+        # Fallback HTML parser (used only when API is unavailable)
         for item in soup.find_all("li", class_=re.compile(r"searchresult")):
             heading = item.find(class_="heading")
             subhead = item.find(class_="subhead")
@@ -1346,6 +1427,17 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             label_str = str(label_data) if label_data else ""
                         remixers = track.get("remixers") or []
                         remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
+                        # Thumbnail: prefer track image, fall back to release image
+                        images = track.get("images") or release.get("images") or {}
+                        if isinstance(images, dict):
+                            thumb = (
+                                (images.get("small") or {}).get("uri")
+                                or (images.get("medium") or {}).get("uri")
+                                or images.get("uri")
+                                or ""
+                            )
+                        else:
+                            thumb = track.get("image") or release.get("image") or ""
                         if t and slug:
                             _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
@@ -1354,7 +1446,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             # Perfect 100.0 only when exact date match; otherwise cap at 99.9
                             if not _prox_unlocks:
                                 score = min(99.9, score)
-                            results.append({
+                            entry = {
                                 "source": "Beatport", "title": t, "artist": a,
                                 "url": url, "score": round(max(0.0, score), 2),
                                 "genre": genre_str,
@@ -1364,7 +1456,10 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                                 "label": label_str,
                                 "remixers": remixer_str,
                                 "direct_url": True, "is_fallback": False,
-                            })
+                            }
+                            if thumb:
+                                entry["thumb"] = thumb
+                            results.append(entry)
             except Exception:
                 pass
         # Beatport secondary fallback: scan raw HTML for "data":[{...}] array
@@ -1431,6 +1526,17 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         label_str = label_data.get("label_name", "") or label_data.get("name", "")
                     else:
                         label_str = str(label_data) if label_data else ""
+                    # Thumbnail
+                    images = track.get("images") or (track.get("release") or {}).get("images") or {}
+                    if isinstance(images, dict):
+                        thumb = (
+                            (images.get("small") or {}).get("uri")
+                            or (images.get("medium") or {}).get("uri")
+                            or images.get("uri")
+                            or ""
+                        )
+                    else:
+                        thumb = track.get("image") or ""
                     _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                     score = (
                         _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens)
@@ -1440,7 +1546,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     # Perfect 100.0 only when exact date match; otherwise cap at 99.9
                     if not _prox_unlocks:
                         score = min(99.9, score)
-                    results.append({
+                    entry = {
                         "source": "Beatport", "title": t, "artist": a,
                         "url": url, "score": round(max(0.0, score), 2),
                         "genre": genre_str,
@@ -1449,7 +1555,10 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         "released": release_date,
                         "label": label_str,
                         "direct_url": direct_url, "is_fallback": False,
-                    })
+                    }
+                    if thumb:
+                        entry["thumb"] = thumb
+                    results.append(entry)
             except Exception:
                 pass
 
@@ -1503,14 +1612,14 @@ def api_web_search_stream():
             yield sse_event("apierror", "Provide a query.")
             return
         qq = requests.utils.quote(norm_q, safe="")
-        sites = [
+        html_sites = [
             ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
             ("Traxsource",  f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"),
-            ("Bandcamp",    f"https://bandcamp.com/search?q={qq}&item_type=t"),
             ("Juno",        f"https://www.junodownload.com/search/?q[keywords]={qq}&solrorder=relevancy"),
         ]
+        bandcamp_search_url = f"https://bandcamp.com/search?q={qq}&item_type=t"
         all_results = []
-        for site_name, search_url in sites:
+        for site_name, search_url in html_sites:
             yield sse_event("log", f"Searching {site_name}\u2026")
             try:
                 r = http_get(search_url, timeout=15)
@@ -1522,6 +1631,26 @@ def api_web_search_stream():
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
             except Exception as exc:
                 yield sse_event("log", f"{site_name}: error \u2014 {str(exc)[:120]}")
+        # Bandcamp: use the public autocomplete API instead of scraping HTML
+        yield sse_event("log", "Searching Bandcamp\u2026")
+        try:
+            bc_raw = _bandcamp_search(norm_q)
+            if bc_raw:
+                found = _parse_bandcamp_api_results(
+                    bc_raw, bandcamp_search_url,
+                    norm_artist, norm_title, year, remix_tokens=remix_tokens,
+                )
+            else:
+                # Fall back to HTML scraping if API returned nothing
+                r = http_get(bandcamp_search_url, timeout=15)
+                found = _parse_web_search_results(
+                    "Bandcamp", bandcamp_search_url, r.text,
+                    norm_artist, norm_title, year, date, remix_tokens,
+                )
+            all_results.extend(found)
+            yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
+        except Exception as exc:
+            yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")
         all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         top = all_results[:10]
         yield sse_event("log", f"Total {len(all_results)} results; showing top {len(top)}")
@@ -2618,6 +2747,7 @@ function webSearch(){{
       window._webResults = data.results;
       el.innerHTML = data.results.map((r,i)=>`
         <div class="result-item">
+          ${{r.thumb ? `<img src="${{esc(r.thumb)}}" style="float:right;max-height:52px;max-width:52px;border-radius:4px;margin-left:8px;object-fit:cover" onerror="this.style.display='none'" loading="lazy">` : ""}}
           <span style="background:#e5e7eb;border-radius:4px;padding:1px 7px;font-size:.76rem;font-weight:700">${{esc(r.source||"")}}</span>
           <strong style="margin-left:6px">${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
           ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
