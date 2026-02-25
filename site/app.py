@@ -1789,7 +1789,7 @@ def api_web_search_stream():
         html_sites = [
             ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
             ("Traxsource",  f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"),
-            ("Juno",        f"https://www.junodownload.com/search/?q[keywords]={qq}&solrorder=relevancy"),
+            ("Juno",        f"https://www.junodownload.com/search/?solrorder=relevancy&q%5Btitle%5D%5B0%5D={qq}"),
         ]
         bandcamp_search_url = f"https://bandcamp.com/search?q={qq}&item_type=t"
         results_by_source = {}
