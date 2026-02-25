@@ -57,7 +57,7 @@ img_mod.Image = None
 sys.modules["PIL"] = pil_mod
 sys.modules["PIL.Image"] = img_mod
 
-from app import _parse_web_search_results  # noqa: E402
+from app import _parse_web_search_results, bandcamp_get, BANDCAMP_UA  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +269,48 @@ def test_debug_info_none_by_default():
         _debug_info=debug,
     )
     assert len(results) == 3
+
+
+# ---------------------------------------------------------------------------
+# bandcamp_get helper
+# ---------------------------------------------------------------------------
+
+def test_bandcamp_get_uses_chrome_ua(monkeypatch):
+    """bandcamp_get must pass the BANDCAMP_UA as User-Agent."""
+    captured = {}
+
+    def fake_get(url, headers=None, **kwargs):
+        captured["headers"] = headers or {}
+        return object()
+
+    import sys
+    sys.modules["requests"].get = fake_get
+
+    bandcamp_get("https://bandcamp.com/search?q=test", timeout=10)
+
+    assert captured["headers"].get("User-Agent") == BANDCAMP_UA
+
+
+def test_bandcamp_get_sends_browser_headers(monkeypatch):
+    """bandcamp_get must include Accept, Accept-Language, Referer, Cache-Control."""
+    captured = {}
+
+    def fake_get(url, headers=None, **kwargs):
+        captured["headers"] = headers or {}
+        return object()
+
+    import sys
+    sys.modules["requests"].get = fake_get
+
+    bandcamp_get("https://bandcamp.com/search?q=test", timeout=10)
+
+    assert "Accept" in captured["headers"]
+    assert "Accept-Language" in captured["headers"]
+    assert captured["headers"].get("Referer") == "https://bandcamp.com/"
+    assert captured["headers"].get("Cache-Control") == "no-cache"
+
+
+def test_bandcamp_ua_is_chrome():
+    """BANDCAMP_UA must contain a mainstream Chrome identifier."""
+    assert "Chrome" in BANDCAMP_UA
+    assert "Mozilla/5.0" in BANDCAMP_UA
