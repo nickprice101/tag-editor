@@ -40,6 +40,9 @@ except Exception:
 
 DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "").strip()
 ACOUSTID_KEY = os.getenv("ACOUSTID_KEY", "").strip()
+# Set WEB_SEARCH_DEBUG=1 to enable verbose Bandcamp diagnostic SSE logs
+# (HTML previews, node snippets).  Off by default to avoid noise.
+WEB_SEARCH_DEBUG = os.getenv("WEB_SEARCH_DEBUG", "").strip() == "1"
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
@@ -1220,16 +1223,49 @@ def _extract_beatport_data_array(html: str) -> list:
         return []
 
 
+# Alternative selectors probed when the primary Bandcamp selector matches nothing.
+_BANDCAMP_ALT_SELECTORS = [
+    ("li[class*=result]",   lambda soup: soup.find_all("li", class_=re.compile(r"result"))),
+    ("div.result-info",     lambda soup: soup.find_all("div", class_="result-info")),
+    ("div.heading",         lambda soup: soup.find_all("div", class_="heading")),
+    ("a[href*=bandcamp.com/track/]", lambda soup: soup.find_all("a", href=re.compile(r"bandcamp\.com/track/"))),
+    (".item-list li",       lambda soup: soup.find_all("li")),
+]
+
 def _parse_web_search_results(site: str, search_url: str, html: str,
                               artist_q: str, title_q: str, year_q: str = "",
-                              date_q: str = "", remix_tokens: list = None) -> list:
-    """Best-effort extraction of track results from a search results page."""
+                              date_q: str = "", remix_tokens: list = None,
+                              _debug_info: list = None) -> list:
+    """Best-effort extraction of track results from a search results page.
+
+    When *_debug_info* is a list it is populated with diagnostic strings
+    describing what the parser found (or failed to find).  This is used by
+    the caller to emit SSE ``log`` events without coupling the parser to the
+    SSE layer.
+    """
     results = []
     soup = BeautifulSoup(html, "html.parser")
 
     if site == "Bandcamp":
         # HTML scraping of Bandcamp's public search page
-        for item in soup.find_all("li", class_=re.compile(r"searchresult")):
+        primary_items = soup.find_all("li", class_=re.compile(r"searchresult"))
+        if _debug_info is not None:
+            _debug_info.append(f"Bandcamp parser: li.searchresult count={len(primary_items)}")
+            if not primary_items:
+                # Probe alternative selectors to help diagnose markup changes
+                alt_counts = []
+                for label, selector_fn in _BANDCAMP_ALT_SELECTORS:
+                    try:
+                        n = len(selector_fn(soup))
+                    except Exception:
+                        n = 0
+                    alt_counts.append(f"{label}:{n}")
+                _debug_info.append("Bandcamp parser alt selectors — " + ", ".join(alt_counts))
+            elif WEB_SEARCH_DEBUG:
+                # Capture a snippet of the first matched node when debug is on
+                first_html = str(primary_items[0])[:300]
+                _debug_info.append(f"Bandcamp parser first node snippet: {first_html}")
+        for item in primary_items:
             heading = item.find(class_="heading")
             subhead = item.find(class_="subhead")
 
@@ -1672,10 +1708,38 @@ def api_web_search_stream():
         yield sse_event("log", "Searching Bandcamp\u2026")
         try:
             r = http_get(bandcamp_search_url, timeout=15)
+            bc_html = r.text
+            bc_lower = bc_html.lower()
+            # HTTP-level diagnostics (always emitted for actionability)
+            final_url = r.url
+            status_code = r.status_code
+            content_type = r.headers.get("content-type", "")
+            html_len = len(bc_html)
+            markers = {
+                "searchresult":            "searchresult" in bc_lower,
+                "itemurl":                 "itemurl" in bc_lower,
+                "bandcamp.com/track/":     "bandcamp.com/track/" in bc_lower,
+                "captcha":                 "captcha" in bc_lower,
+                "cloudflare":              "cloudflare" in bc_lower,
+                "enable javascript":       "enable javascript" in bc_lower,
+                "consent":                 "consent" in bc_lower,
+            }
+            marker_str = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in markers.items())
+            yield sse_event("log", (
+                f"Bandcamp HTTP: status={status_code} len={html_len} "
+                f"ct={content_type!r} final_url={final_url}"
+            ))
+            yield sse_event("log", f"Bandcamp markers: {marker_str}")
+            if WEB_SEARCH_DEBUG:
+                yield sse_event("log", f"Bandcamp HTML preview: {bc_html[:400]!r}")
+            bc_debug: list = []
             found = _parse_web_search_results(
-                "Bandcamp", bandcamp_search_url, r.text,
+                "Bandcamp", bandcamp_search_url, bc_html,
                 norm_artist, norm_title, year, date, remix_tokens,
+                _debug_info=bc_debug,
             )
+            for msg in bc_debug:
+                yield sse_event("log", msg)
             yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
         except Exception as exc:
             yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")

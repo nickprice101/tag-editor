@@ -217,3 +217,55 @@ def test_no_keyerror_on_missing_attrs():
     assert results[0]["artist"] == ""
     assert "thumb" not in results[0]
     assert "released" not in results[0]
+
+
+# ---------------------------------------------------------------------------
+# Debug diagnostics (_debug_info)
+# ---------------------------------------------------------------------------
+
+def test_debug_info_populated_on_match():
+    """_debug_info receives a count message when results are found."""
+    debug: list = []
+    _parse_web_search_results(
+        "Bandcamp", "https://bandcamp.com/search?q=test", SAMPLE_HTML,
+        artist_q="40 Thieves", title_q="Don't Turn It Off",
+        _debug_info=debug,
+    )
+    assert any("li.searchresult count=3" in msg for msg in debug)
+
+
+def test_debug_info_alt_selectors_when_no_match():
+    """When no li.searchresult is found, alt-selector counts are reported."""
+    empty_html = "<html><body><p>No results</p></body></html>"
+    debug: list = []
+    results = _parse_web_search_results(
+        "Bandcamp", "https://bandcamp.com/search?q=test", empty_html,
+        artist_q="artist", title_q="title",
+        _debug_info=debug,
+    )
+    # The function returns a fallback entry when nothing is found
+    assert len(results) == 1
+    assert results[0]["is_fallback"] is True
+    assert any("li.searchresult count=0" in msg for msg in debug)
+    # At least one message should mention the alt-selector probe
+    assert any("alt selectors" in msg for msg in debug)
+
+
+def test_debug_info_not_required():
+    """Omitting _debug_info (default None) must not raise."""
+    results = _parse_web_search_results(
+        "Bandcamp", "https://bandcamp.com/search?q=test", SAMPLE_HTML,
+        artist_q="40 Thieves", title_q="Don't Turn It Off",
+    )
+    assert len(results) == 3
+
+
+def test_debug_info_none_by_default():
+    """Passing _debug_info=None explicitly must not raise."""
+    debug = None
+    results = _parse_web_search_results(
+        "Bandcamp", "https://bandcamp.com/search?q=test", SAMPLE_HTML,
+        artist_q="", title_q="",
+        _debug_info=debug,
+    )
+    assert len(results) == 3
