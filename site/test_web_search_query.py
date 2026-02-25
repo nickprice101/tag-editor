@@ -320,6 +320,46 @@ def test_obfuscate_key_40char_discogs_token():
 # remix identity words are included in norm_q
 # ---------------------------------------------------------------------------
 
+def _build_norm_q_out(q: str) -> tuple:
+    """Replicate the norm_q / norm_q_out logic from api_web_search_stream."""
+    q_artist, q_title = _split_query_artist_title(q)
+    norm_title, norm_artist, remix_tokens = normalize_search_query(q_title or q, q_artist)
+    norm_q = f"{norm_artist} {norm_title}".strip() if (norm_artist or norm_title) else q
+    if remix_tokens:
+        identity_words = []
+        for tok in remix_tokens:
+            norm = _normalize_remix_handle(tok).lower()
+            identity_words.extend(
+                w for w in re.findall(r'\w+', norm)
+                if not _REMIX_KW_RE.match(w) and len(w) > 2
+            )
+        if identity_words:
+            norm_q = f"{norm_q} {' '.join(dict.fromkeys(identity_words))}".strip()
+    norm_q_out = norm_q.lower()
+    return norm_q, norm_q_out
+
+
+def test_outgoing_query_is_lowercase():
+    """norm_q_out (used for URL construction) must be fully lowercase."""
+    _, norm_q_out = _build_norm_q_out("Dumpalltheguns \u2014 Adi Oasis, Jitwam")
+    assert norm_q_out == norm_q_out.lower()
+
+
+def test_outgoing_query_lowercase_with_remix():
+    """norm_q_out must be lowercase even when remix tokens add identity words."""
+    _, norm_q_out = _build_norm_q_out("Adi Oasis \u2013 Dumpalltheguns (@jitwam Remix)")
+    assert norm_q_out == norm_q_out.lower()
+
+
+def test_scoring_norm_q_unchanged():
+    """norm_q (used for scoring) retains original casing; only norm_q_out is lowercased."""
+    norm_q, norm_q_out = _build_norm_q_out("Adi Oasis \u2013 Dumpalltheguns")
+    # norm_q_out is lowercase
+    assert norm_q_out == norm_q_out.lower()
+    # norm_q retains mixed case from normalization
+    assert norm_q == "Adi Oasis Dumpalltheguns"
+
+
 def test_remix_identity_words_in_norm_q():
     """Remix identity words extracted from tokens are appended to norm_q."""
     q = "Adi Oasis \u2013 Dumpalltheguns (@jitwam Remix)"
