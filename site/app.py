@@ -2475,6 +2475,21 @@ def ui_home():
     input.dirty:focus, textarea.dirty:focus {{ box-shadow: 0 0 0 3px rgba(185,28,28,.15); }}
     textarea {{ resize: vertical; }}
     .hint {{ color: var(--muted); font-size: .78rem; margin: -8px 0 10px; }}
+    .field-wrap {{ position: relative; }}
+    .revert-btn {{
+      display: none; position: absolute; right: 6px; top: 6px;
+      padding: 2px 7px; font-size: .75rem; font-weight: 600; line-height: 1.4;
+      border: 1px solid #b91c1c; border-radius: 4px; background: #fff; color: #b91c1c;
+      cursor: pointer; z-index: 1;
+    }}
+    .revert-btn:hover {{ background: #fef2f2; }}
+    .field-wrap.dirty .revert-btn {{ display: inline-block; }}
+    .old-value {{
+      display: none; font-size: .75rem; color: var(--muted);
+      margin: -10px 0 10px; padding: 2px 4px;
+      word-break: break-all;
+    }}
+    .field-wrap.dirty ~ .old-value {{ display: block; }}
     .btn {{
       display: inline-block; padding: 8px 14px; font-size: .85rem; font-weight: 600;
       border: none; border-radius: 6px; background: var(--accent); color: #fff;
@@ -2791,6 +2806,48 @@ def ui_home():
 
 <script>
 let _baseline = {{}};
+
+function ensureRevertUIForField(name) {{
+  const el = document.querySelector(`[name="${{name}}"]`);
+  if(!el || el.dataset.revertUiDone) return;
+  el.dataset.revertUiDone = "1";
+  const wrap = document.createElement("div");
+  wrap.className = "field-wrap";
+  el.parentNode.insertBefore(wrap, el);
+  wrap.appendChild(el);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "revert-btn";
+  btn.title = "Revert to saved value";
+  btn.textContent = "\u21a9 Revert";
+  btn.dataset.revertFor = name;
+  wrap.appendChild(btn);
+  const saved = document.createElement("div");
+  saved.className = "old-value";
+  saved.dataset.oldValueFor = name;
+  wrap.insertAdjacentElement("afterend", saved);
+}}
+
+function updateRevertUI(name) {{
+  const el = document.querySelector(`[name="${{name}}"]`);
+  if(!el) return;
+  const wrap = el.closest(".field-wrap");
+  const saved = document.querySelector(`[data-old-value-for="${{name}}"]`);
+  const isDirty = (name in _baseline) && el.value !== (_baseline[name] || "");
+  if(wrap) {{
+    if(isDirty) wrap.classList.add("dirty");
+    else wrap.classList.remove("dirty");
+  }}
+  if(saved) {{
+    if(isDirty) {{ saved.style.display = "block"; saved.textContent = "Saved: " + (_baseline[name] || "(empty)"); }}
+    else {{ saved.style.display = "none"; saved.textContent = ""; }}
+  }}
+}}
+
+function updateAllRevertUI() {{
+  for(const k of Object.keys(_baseline)) updateRevertUI(k);
+}}
+
 function setBaseline(data) {{
   const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
     "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
@@ -2798,6 +2855,8 @@ function setBaseline(data) {{
   _baseline = {{}};
   for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
   document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
+  for(const k of keys) ensureRevertUIForField(k);
+  updateAllRevertUI();
 }}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
 function setField(name, val){{
@@ -2808,6 +2867,7 @@ function setField(name, val){{
     if(el.value !== (_baseline[name] || "")) el.classList.add("dirty");
     else el.classList.remove("dirty");
   }}
+  updateRevertUI(name);
 }}
 function getField(name){{ const el = document.querySelector(`[name="${{name}}"]`); return el ? el.value : ""; }}
 
@@ -2835,20 +2895,9 @@ function applyIsName(fieldName, sortFieldName, cb) {{
   if(!cb.checked) return;
   const el = document.querySelector(`[name="${{fieldName}}"]`);
   if(!el || !el.value.trim()) {{ cb.checked = false; return; }}
-  el.value = isNameTransform(el.value);
-  if(fieldName in _baseline) {{
-    if(el.value !== (_baseline[fieldName] || "")) el.classList.add("dirty");
-    else el.classList.remove("dirty");
-  }}
+  setField(fieldName, isNameTransform(el.value));
   // Also update the sort field if it is currently blank
-  const sortEl = document.querySelector(`[name="${{sortFieldName}}"]`);
-  if(sortEl && !sortEl.value.trim()) {{
-    sortEl.value = sortName(el.value);
-    if(sortFieldName in _baseline) {{
-      if(sortEl.value !== (_baseline[sortFieldName] || "")) sortEl.classList.add("dirty");
-      else sortEl.classList.remove("dirty");
-    }}
-  }}
+  if(!getField(sortFieldName)) setField(sortFieldName, sortName(getField(fieldName)));
 }}
 
 function renderFileItem(it, idx){{
@@ -2965,16 +3014,16 @@ async function loadTags(){{
   }}
   // Autopopulate label/publisher (only if blank)
   const lv = getField("label"), pv = getField("publisher");
-  if(lv && !pv) {{ const el = document.querySelector('[name="publisher"]'); if(el) el.value = lv; }}
-  if(pv && !lv) {{ const el = document.querySelector('[name="label"]'); if(el) el.value = pv; }}
+  if(lv && !pv) setField("publisher", lv);
+  if(pv && !lv) setField("label", pv);
   // Autopopulate year from date (only if year is blank)
   const dv = getField("date"), yv = getField("year");
-  if(dv && !yv) {{ const el = document.querySelector('[name="year"]'); if(el) el.value = dv.substring(0,4); }}
+  if(dv && !yv) setField("year", dv.substring(0,4));
   // Autopopulate sort fields (only if blank)
   const artV = getField("artist"), artSortV = getField("artist_sort");
-  if(artV && !artSortV) {{ const el = document.querySelector('[name="artist_sort"]'); if(el) el.value = sortName(artV); }}
+  if(artV && !artSortV) setField("artist_sort", sortName(artV));
   const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
-  if(aaV && !aaSortV) {{ const el = document.querySelector('[name="albumartist_sort"]'); if(el) el.value = sortName(aaV); }}
+  if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
   setBaseline(null);
   document.getElementById("genreSuggestions").innerHTML = "";
@@ -3465,16 +3514,16 @@ async function revertTags() {{
   }}
   // Autopopulate label/publisher (only if blank)
   const lv = getField("label"), pv = getField("publisher");
-  if(lv && !pv) {{ const el = document.querySelector('[name="publisher"]'); if(el) el.value = lv; }}
-  if(pv && !lv) {{ const el = document.querySelector('[name="label"]'); if(el) el.value = pv; }}
+  if(lv && !pv) setField("publisher", lv);
+  if(pv && !lv) setField("label", pv);
   // Autopopulate year from date (only if year is blank)
   const dv = getField("date"), yv = getField("year");
-  if(dv && !yv) {{ const el = document.querySelector('[name="year"]'); if(el) el.value = dv.substring(0,4); }}
+  if(dv && !yv) setField("year", dv.substring(0,4));
   // Autopopulate sort fields (only if blank)
   const artV = getField("artist"), artSortV = getField("artist_sort");
-  if(artV && !artSortV) {{ const el = document.querySelector('[name="artist_sort"]'); if(el) el.value = sortName(artV); }}
+  if(artV && !artSortV) setField("artist_sort", sortName(artV));
   const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
-  if(aaV && !aaSortV) {{ const el = document.querySelector('[name="albumartist_sort"]'); if(el) el.value = sortName(aaV); }}
+  if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   setBaseline(null);
   document.getElementById("mbResults").innerHTML = "";
   document.getElementById("discogsResults").innerHTML = "";
@@ -3505,6 +3554,16 @@ document.getElementById("tagForm").addEventListener("input", function(e) {{
   if(!name || !(name in _baseline)) return;
   if(e.target.value !== (_baseline[name] || "")) e.target.classList.add("dirty");
   else e.target.classList.remove("dirty");
+  updateRevertUI(name);
+}});
+
+// Delegated click handler for per-field revert buttons
+document.getElementById("tagForm").addEventListener("click", function(e) {{
+  const btn = e.target.closest(".revert-btn");
+  if(!btn) return;
+  const name = btn.dataset.revertFor;
+  if(!name || !(name in _baseline)) return;
+  setField(name, _baseline[name]);
 }});
 
 async function suggestGenre() {{
