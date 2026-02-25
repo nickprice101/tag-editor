@@ -1,0 +1,194 @@
+"""
+Tests for case-insensitive scoring and Juno secondary parser track_number extraction.
+"""
+
+import sys
+import os
+import types
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+# Minimal stubs so app.py can be imported without real dependencies
+for mod in ("acoustid", "mutagen", "mutagen.id3", "mutagen.mp3", "PIL", "PIL.Image",
+            "flask", "requests"):
+    if mod not in sys.modules:
+        sys.modules[mod] = types.ModuleType(mod)
+
+flask_mod = sys.modules["flask"]
+
+class _FakeApp:
+    def route(self, *a, **kw):
+        return lambda f: f
+    def run(self, *a, **kw):
+        pass
+
+flask_mod.Flask = lambda *a, **kw: _FakeApp()
+flask_mod.request = None
+flask_mod.Response = type("Response", (), {})
+flask_mod.jsonify = None
+
+requests_mod = sys.modules["requests"]
+requests_mod.Response = type("Response", (), {})
+requests_mod.Session = type("Session", (), {"get": lambda *a, **kw: None})
+requests_mod.get = lambda *a, **kw: None
+
+id3_mod = types.ModuleType("mutagen.id3")
+for sym in ("ID3", "ID3NoHeaderError", "TIT2", "TPE1", "TALB", "TPE2", "TCON",
+            "TRCK", "TPUB", "COMM", "TDRC", "TYER", "TXXX", "TSOP", "TSO2",
+            "APIC", "TBPM"):
+    setattr(id3_mod, sym, None)
+sys.modules["mutagen.id3"] = id3_mod
+
+mp3_mod = types.ModuleType("mutagen.mp3")
+mp3_mod.MP3 = None
+sys.modules["mutagen.mp3"] = mp3_mod
+
+pil_mod = types.ModuleType("PIL")
+img_mod = types.ModuleType("PIL.Image")
+img_mod.Image = None
+sys.modules["PIL"] = pil_mod
+sys.modules["PIL.Image"] = img_mod
+
+from app import _score_result, _parse_web_search_results  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive scoring tests
+# ---------------------------------------------------------------------------
+
+def test_score_case_insensitive_title():
+    """Title comparison must be case-insensitive: 'Track' vs 'track' → same score as exact match."""
+    score_exact = _score_result("Artist", "Track", "Artist", "Track")
+    score_upper = _score_result("Artist", "TRACK", "Artist", "track")
+    assert score_exact == score_upper == 100.0
+
+
+def test_score_case_insensitive_artist():
+    """Artist comparison must be case-insensitive: 'Artist' vs 'artist' → same score."""
+    score_exact = _score_result("Artist", "Track", "Artist", "Track")
+    score_mixed = _score_result("ARTIST", "track", "artist", "TRACK")
+    assert score_exact == score_mixed == 100.0
+
+
+def test_score_mixed_case_no_penalty():
+    """Mixed-case title and artist still yield 100 when content matches ignoring case."""
+    score = _score_result("Adi Oasis", "Dumpalltheguns", "ADI OASIS", "DUMPALLTHEGUNS")
+    assert score == 100.0
+
+
+def test_score_case_insensitive_partial_mismatch():
+    """Case-insensitive comparison: different content (not just case) still penalises correctly."""
+    score_match = _score_result("Artist", "Track One", "Artist", "TRACK ONE")
+    score_mismatch = _score_result("Artist", "Track One", "Artist", "TRACK TWO")
+    assert score_match == 100.0
+    assert score_mismatch < 100.0
+
+
+# ---------------------------------------------------------------------------
+# Juno secondary parser: track_number extraction
+# ---------------------------------------------------------------------------
+
+JUNO_SECONDARY_HTML_HREF = """
+<html><body>
+<div class="jd-listing-item">
+  <div class="juno-artist"><a href="#">Some Artist</a></div>
+  <div class="juno-title">
+    <a class="juno-title" href="/products/some-track/1234/?track_number=3">Some Track</a>
+  </div>
+  <a href="https://www.junodownload.com/products/some-track/1234/?track_number=3">link</a>
+</div>
+</body></html>
+"""
+
+JUNO_SECONDARY_HTML_ONCLICK = """
+<html><body>
+<div class="jd-listing-item">
+  <div class="juno-artist"><a href="#">Another Artist</a></div>
+  <div class="juno-title">
+    <a class="juno-title"
+       href="/products/another-track/5678/"
+       onclick="show_pl_context_menu(event, { artist: 'Another Artist', title: 'Another Track', track_number: '7', release_id: '5678' });">Another Track</a>
+  </div>
+  <a href="https://www.junodownload.com/products/another-track/5678/">link</a>
+</div>
+</body></html>
+"""
+
+JUNO_SECONDARY_HTML_NO_TRACK = """
+<html><body>
+<div class="jd-listing-item">
+  <div class="juno-artist"><a href="#">No Track Artist</a></div>
+  <div class="juno-title">
+    <a class="juno-title" href="/products/no-track/9999/">No Track Number</a>
+  </div>
+  <a href="https://www.junodownload.com/products/no-track/9999/">link</a>
+</div>
+</body></html>
+"""
+
+
+def test_juno_secondary_track_number_from_href():
+    """track_number is extracted from the a.juno-title href query string."""
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        JUNO_SECONDARY_HTML_HREF,
+        artist_q="Some Artist",
+        title_q="Some Track",
+    )
+    assert len(results) == 1
+    assert results[0].get("track_number") == "3"
+
+
+def test_juno_secondary_track_number_from_onclick_fallback():
+    """track_number is extracted from onclick when not in href query string."""
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        JUNO_SECONDARY_HTML_ONCLICK,
+        artist_q="Another Artist",
+        title_q="Another Track",
+    )
+    assert len(results) == 1
+    assert results[0].get("track_number") == "7"
+
+
+def test_juno_secondary_no_track_number_when_absent():
+    """track_number key is absent when neither href nor onclick contains it."""
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        JUNO_SECONDARY_HTML_NO_TRACK,
+        artist_q="No Track Artist",
+        title_q="No Track Number",
+    )
+    assert len(results) == 1
+    assert "track_number" not in results[0]
+
+
+def test_juno_secondary_href_takes_precedence_over_onclick():
+    """When href has track_number, it is used even if onclick also has one."""
+    html = """
+    <html><body>
+    <div class="jd-listing-item">
+      <div class="juno-artist"><a href="#">Artist</a></div>
+      <div class="juno-title">
+        <a class="juno-title"
+           href="/products/track/111/?track_number=2"
+           onclick="show_pl_context_menu(event, { track_number: '99' });">Title</a>
+      </div>
+      <a href="https://www.junodownload.com/products/track/111/?track_number=2">link</a>
+    </div>
+    </body></html>
+    """
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        html,
+        artist_q="Artist",
+        title_q="Title",
+    )
+    assert len(results) == 1
+    assert results[0].get("track_number") == "2"

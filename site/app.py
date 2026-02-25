@@ -264,6 +264,12 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
     if not title_q and not artist_q:
         return 0.0
 
+    # Normalise case centrally so all comparisons are case-insensitive
+    title_q = (title_q or "").lower()
+    res_title = (res_title or "").lower()
+    artist_q = (artist_q or "").lower()
+    res_artist = (res_artist or "").lower()
+
     score = 100.0
 
     # Title penalty (up to 60 pts)
@@ -1520,6 +1526,19 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 thumb = img_el["src"] if img_el else ""
                 if raw_href and not raw_href.startswith("http"):
                     raw_href = "https://www.junodownload.com" + raw_href
+                # Extract track_number from a.juno-title href query string
+                track_number = None
+                title_link_el = title_el.find("a", href=True) if title_el else None
+                if title_link_el:
+                    tn_qs = parse_qs(urlparse(title_link_el["href"]).query)
+                    if "track_number" in tn_qs:
+                        track_number = tn_qs["track_number"][0]
+                # Fallback: extract from onclick attribute
+                if track_number is None and title_link_el:
+                    onclick = title_link_el.get("onclick", "") or ""
+                    m_tn = re.search(r"track_number\s*:\s*'(\d+)'", onclick)
+                    if m_tn:
+                        track_number = m_tn.group(1)
                 if t and raw_href:
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                             _compilation_penalty(a)
@@ -1531,6 +1550,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     }
                     if thumb:
                         entry["thumb"] = thumb
+                    if track_number is not None:
+                        entry["track_number"] = track_number
                     results.append(entry)
         # fallback: product heading
             for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
