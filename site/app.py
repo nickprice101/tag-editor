@@ -199,6 +199,20 @@ def normalize_search_query(title: str, artist: str = "") -> tuple:
 
     return clean_title, clean_artist, remix_tokens
 
+def _split_query_artist_title(q: str) -> tuple:
+    """Split a free-form query string into (artist, title) when it matches
+    "Artist – Title" or "Artist - Title" (en-dash, em-dash, or ASCII hyphen
+    surrounded by whitespace).  Returns ("", q) when no separator is found so
+    the caller can treat the whole string as the title / full query.
+    """
+    m = re.search(r'\s+[\u2013\u2014]\s+|\s+-\s+', q)
+    if m:
+        artist = q[:m.start()].strip()
+        title = q[m.end():].strip()
+        if artist and title:
+            return artist, title
+    return "", q
+
 def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
                   year_q: str = "", res_year: str = "", remix_tokens: list = None) -> float:
     """Returns a score 0–100 based on query/result similarity (60% title, 40% artist).
@@ -1775,16 +1789,27 @@ def api_web_search_stream():
     title = (request.args.get("title") or "").strip()
     year = (request.args.get("year") or "").strip()
     date = (request.args.get("date") or "").strip()
-    q = (request.args.get("q") or "").strip() or f"{artist} {title}".strip()
+    q_raw = (request.args.get("q") or "").strip()
 
-    # Normalise for query building and scoring
-    norm_title, norm_artist, remix_tokens = normalize_search_query(title or q, artist)
+    # If q was explicitly provided, it is the source of truth for the search.
+    # Parse it as "Artist – Title" for scoring; otherwise fall back to the
+    # individual artist/title form fields.
+    if q_raw:
+        q = q_raw
+        q_artist, q_title = _split_query_artist_title(q_raw)
+        norm_title, norm_artist, remix_tokens = normalize_search_query(
+            q_title or q_raw, q_artist
+        )
+    else:
+        q = f"{artist} {title}".strip()
+        norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
     norm_q = f"{norm_artist} {norm_title}".strip() if (norm_artist or norm_title) else q
 
     def generate():
         if not q:
             yield sse_event("apierror", "Provide a query.")
             return
+        yield sse_event("log", f"Query: q={q!r} \u2192 artist={norm_artist!r}, title={norm_title!r}, norm_q={norm_q!r}")
         qq = requests.utils.quote(norm_q, safe="")
         html_sites = [
             ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
@@ -3265,12 +3290,19 @@ function showImageModal(src) {{
 async function loadKeyStatus(){{
   try{{
     const res = await fetch("/api/key_status");
+    if(!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     const dk = document.getElementById("discogsKeyStatus");
     const ak = document.getElementById("acoustidKeyStatus");
-    if(dk) dk.textContent = data.discogs?.display || "";
-    if(ak) ak.textContent = data.acoustid?.display || "";
-  }} catch(e){{}}
+    if(dk) dk.textContent = data.discogs?.display || "DISCOGS_TOKEN not set";
+    if(ak) ak.textContent = data.acoustid?.display || "ACOUSTID_KEY not set";
+  }} catch(e){{
+    const dk = document.getElementById("discogsKeyStatus");
+    const ak = document.getElementById("acoustidKeyStatus");
+    const msg = "key status unavailable: " + e.message;
+    if(dk) dk.textContent = msg;
+    if(ak) ak.textContent = msg;
+  }}
 }}
 
 document.addEventListener("keydown", function(e){{
