@@ -151,11 +151,12 @@ def sort_name(name: str) -> str:
     return name
 
 def obfuscate_key(key: str) -> str:
-    """Show only last 8 chars with x padding, or full key if ≤8 chars."""
+    """Show 8 'x' prefix then the last 8 chars, or full key if ≤ 8 chars."""
     if not key:
         return ""
-    n = min(8, len(key))
-    return "x" * (len(key) - n) + key[-n:]
+    if len(key) <= 8:
+        return key
+    return "xxxxxxxx" + key[-8:]
 
 def _similarity(a: str, b: str) -> float:
     if not a or not b:
@@ -1867,6 +1868,17 @@ def api_web_search_stream():
         q = f"{artist} {title}".strip()
         norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
     norm_q = f"{norm_artist} {norm_title}".strip() if (norm_artist or norm_title) else q
+    # Append remix identity words so sources can find remix-specific results
+    if remix_tokens:
+        _identity_words = []
+        for _tok in remix_tokens:
+            _norm = _normalize_remix_handle(_tok).lower()
+            _identity_words.extend(
+                w for w in re.findall(r'\w+', _norm)
+                if not _REMIX_KW_RE.match(w) and len(w) > 2
+            )
+        if _identity_words:
+            norm_q = f"{norm_q} {' '.join(dict.fromkeys(_identity_words))}".strip()
 
     def generate():
         if not q:
@@ -2191,7 +2203,7 @@ def api_discogs_search_stream():
             params = {"q": norm_q, "type": "release", "per_page": 10}
             if norm_artist:
                 params["artist"] = norm_artist
-            yield sse_event("log", "Sending request to Discogs API\u2026")
+            yield sse_event("log", f"Auth: token present ({obfuscate_key(DISCOGS_TOKEN)}), scheme='Discogs token=...'")
             r = http_get("https://api.discogs.com/database/search",
                          params=params, timeout=25,
                          headers={"Authorization": f"Discogs token={DISCOGS_TOKEN}"})
@@ -2865,6 +2877,13 @@ function openFile(p){{
   // highlight selected item in dir list
   document.querySelectorAll(".file-item.selected").forEach(el => el.classList.remove("selected"));
   document.querySelectorAll(`[data-path="${{CSS.escape(p)}}"]`).forEach(el => el.classList.add("selected"));
+  // Update web search query with filename (unless user manually edited since last auto-set)
+  const wsqEl = document.getElementById("wsq");
+  if(wsqEl && (!wsqEl.value.trim() || wsqEl.value.trim() === _wsqAutoValue.trim())){{
+    const autoVal = fn.replace(/\\.mp3$/i, "");
+    wsqEl.value = autoVal;
+    _wsqAutoValue = autoVal;
+  }}
 }}
 
 async function loadFileByPath(p){{
@@ -2873,6 +2892,9 @@ async function loadFileByPath(p){{
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
   await loadTags();
+  // Scroll to Edit Tags section
+  const editH2 = Array.from(document.querySelectorAll("h2")).find(h => h.textContent.trim() === "Edit Tags");
+  if(editH2) editH2.scrollIntoView({{behavior: "smooth", block: "start"}});
 }}
 
 function upDir(){{
@@ -2951,11 +2973,13 @@ async function loadTags(){{
     artImg.src = "";
     if(artDims) artDims.textContent = "";
   }}
-  // Pre-populate web search query if blank
+  // Always update web search query when a file is loaded
   const wsq = document.getElementById("wsq");
-  if(wsq && !wsq.value.trim()){{
+  if(wsq){{
     const art = data.artist || ""; const tit = data.title || "";
-    wsq.value = (art && tit) ? `${{art}} \u2013 ${{tit}}` : (art || tit || fn.replace(/\\.mp3$/i,""));
+    const autoVal = (art && tit) ? `${{art}} \u2013 ${{tit}}` : (art || tit || fn.replace(/\\.mp3$/i,""));
+    wsq.value = autoVal;
+    _wsqAutoValue = autoVal;
   }}
 }}
 
@@ -3237,6 +3261,8 @@ function lastfm() {{
 }}
 
 let _dirItems = [], _searchItems = [];
+let _wsqAutoValue = "";
+document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
 document.getElementById("dirList").addEventListener("click", function(e){{
   const item = e.target.closest("[data-idx]");
