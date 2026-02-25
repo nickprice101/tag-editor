@@ -213,32 +213,96 @@ def _split_query_artist_title(q: str) -> tuple:
             return artist, title
     return "", q
 
+
+def _expand_year_only_date(date_str: str) -> str:
+    """Expand a year-only string (YYYY) to YYYY-06-15 for date comparison.
+    Returns the input unchanged if it already contains month/day or is empty."""
+    if date_str and re.match(r'^\d{4}$', date_str.strip()):
+        return date_str.strip() + "-06-15"
+    return date_str or ""
+
+
+def _normalize_remix_handle(token: str) -> str:
+    """Strip leading @ from handle-like words (e.g. '@jitwam Remix' -> 'jitwam Remix')."""
+    return re.sub(r'(?<!\w)@(\w)', r'\1', token)
+
+
+def _remix_match_level(remix_tokens: list, res_title_lc: str) -> int:
+    """Return the best remix match level for the result title.
+
+    Returns:
+        2  – at least one token's identity is present AND a remix keyword is present
+        1  – at least one token's identity is present (no remix keyword)
+        0  – no identity match found
+    """
+    for token in remix_tokens:
+        norm = _normalize_remix_handle(token).lower()
+        # Extract non-keyword words as the remixer identity
+        identity_words = [
+            w for w in re.findall(r'\w+', norm)
+            if not _REMIX_KW_RE.match(w) and len(w) > 2
+        ]
+        if identity_words and any(w in res_title_lc for w in identity_words):
+            if _REMIX_KW_RE.search(res_title_lc):
+                return 2
+            return 1
+    return 0
+
+
 def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
-                  year_q: str = "", res_year: str = "", remix_tokens: list = None) -> float:
-    """Returns a score 0–100 based on query/result similarity (60% title, 40% artist).
-    Optionally boosts by up to 5 points for year match and up to 5 for remix match."""
-    score = 0.0
+                  year_q: str = "", res_year: str = "", remix_tokens: list = None,
+                  date_q: str = "") -> float:
+    """Score 0–100 (penalty-based). Start at 100, subtract for mismatches.
+
+    Penalties:
+      - Title:  up to 60 pts  (weighted by 1 − similarity)
+      - Artist: up to 40 pts  (weighted by 1 − similarity; @ handles normalised)
+      - Date:   up to 10 pts  (full-date distance) or up to 5 pts (year-only)
+      - Remix:  up to 8 pts   (identity missing) or 4 pts (identity present, no keyword)
+    """
+    if not title_q and not artist_q:
+        return 0.0
+
+    score = 100.0
+
+    # Title penalty (up to 60 pts)
     if title_q:
-        score += _similarity(title_q, res_title) * 60
+        score -= (1.0 - _similarity(title_q, res_title)) * 60
+
+    # Artist penalty (up to 40 pts); normalise leading @ on both sides
     if artist_q:
-        score += _similarity(artist_q, res_artist) * 40
-    if title_q and res_title and title_q.lower() == res_title.lower():
-        score += 10
-    if year_q and res_year and year_q.isdigit() and res_year.isdigit():
+        norm_aq = _normalize_remix_handle(artist_q)
+        norm_ra = _normalize_remix_handle(res_artist or "")
+        score -= (1.0 - _similarity(norm_aq, norm_ra)) * 40
+
+    # Date penalty
+    effective_date_q = _expand_year_only_date(date_q) if date_q else ""
+    if effective_date_q:
+        # Full date (or expanded year-only) available for query
+        res_date_str = _expand_year_only_date(res_year) if res_year else ""
+        if res_date_str:
+            try:
+                q_d = dt_date.fromisoformat(effective_date_q[:10])
+                r_d = dt_date.fromisoformat(res_date_str[:10])
+                diff_days = abs((q_d - r_d).days)
+                max_days = 10 * 365.25
+                score -= min(1.0, diff_days / max_days) * 10
+            except (ValueError, TypeError):
+                pass
+    elif year_q and res_year and year_q.isdigit() and res_year.isdigit():
+        # Year-only fallback: small penalty scaled over 10 years
         diff = abs(int(year_q) - int(res_year))
-        if diff == 0:
-            score += 5
-        elif diff == 1:
-            score += 2
-    # Secondary remix-token bonus: small boost when a remix descriptor from the
-    # query appears in the result title (e.g. "Original Mix" query → result title).
+        score -= min(1.0, diff / 10.0) * 5
+
+    # Remix penalty: penalise when remix intent from query is unmet
     if remix_tokens and res_title:
-        res_title_lc = res_title.lower()
-        for token in remix_tokens:
-            if token.lower() in res_title_lc or _similarity(token, res_title) > 0.6:
-                score += 5
-                break
-    return round(min(100.0, score), 1)
+        level = _remix_match_level(remix_tokens, res_title.lower())
+        if level == 0:
+            score -= 8
+        elif level == 1:
+            score -= 4
+
+    return round(min(100.0, max(0.0, score)), 1)
 
 
 def _beatport_date_proximity_score(date_q: str, release_date: str) -> tuple:
@@ -1396,7 +1460,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         released = m.group(1).strip()
 
             if t and item_url:
-                score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens) + _BANDCAMP_SCORE_BOOST
+                score = _score_result(artist_q, title_q, artist, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + _BANDCAMP_SCORE_BOOST
                 entry = {
                     "source": "Bandcamp", "title": t, "artist": artist,
                     "url": item_url,
@@ -1431,7 +1495,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             if raw_href and not raw_href.startswith("http"):
                 raw_href = "https://www.junodownload.com" + raw_href
             if t and raw_href:
-                score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+                score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                         _compilation_penalty(a)
                 entry = {
                     "source": "Juno", "title": t, "artist": a,
@@ -1456,7 +1520,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 if raw_href and not raw_href.startswith("http"):
                     raw_href = "https://www.junodownload.com" + raw_href
                 if t and raw_href:
-                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                             _compilation_penalty(a)
                     entry = {
                         "source": "Juno", "title": t, "artist": a,
@@ -1468,7 +1532,6 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         entry["thumb"] = thumb
                     results.append(entry)
         # fallback: product heading
-        if not results:
             for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
                 link_el = item.find("a", href=re.compile(r"/products/"))
                 title_el = item.find("span", class_=re.compile(r"title"))
@@ -1479,7 +1542,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 thumb = img_el["src"] if img_el else ""
                 if t and link_el:
                     url = "https://www.junodownload.com" + link_el["href"]
-                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+                    score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                             _compilation_penalty(a)
                     entry = {
                         "source": "Juno", "title": t, "artist": a,
@@ -1538,7 +1601,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
             rdate_cell = item.find("div", class_="r-date")
             released = rdate_cell.get_text(strip=True) if rdate_cell else ""
             # Score
-            score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+            score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                     _compilation_penalty(a)
             entry = {
                 "source": "Traxsource", "title": t, "artist": a,
@@ -1621,7 +1684,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             )
                         if t and slug:
                             _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
-                            score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens) + \
+                            score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens, date_q=date_q) + \
                                     _compilation_penalty(a, release_type, track_count) + \
                                     _prox_bonus
                             # Perfect 100.0 only when exact date match; otherwise cap at 99.9
@@ -1727,7 +1790,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         )
                     _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                     score = (
-                        _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens)
+                        _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens, date_q=date_q)
                         + _compilation_penalty(a)
                         + _prox_bonus
                     )
@@ -1762,7 +1825,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     "url": search_url,
                     # No release_date available here; date proximity is (0, False),
                     # so cap at 99 is consistent with the proximity-required-for-100 rule.
-                    "score": min(99.0, _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens)),
+                    "score": min(99.0, _score_result(artist_q, title_q, "", t, year_q, remix_tokens=remix_tokens, date_q=date_q)),
                     "note": "Parsed from og:title; click to search manually.",
                     "direct_url": False, "is_fallback": True,
                 })

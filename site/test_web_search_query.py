@@ -52,7 +52,9 @@ img_mod.Image = None
 sys.modules["PIL"] = pil_mod
 sys.modules["PIL.Image"] = img_mod
 
-from app import _split_query_artist_title, normalize_search_query  # noqa: E402
+from app import (_split_query_artist_title, normalize_search_query,  # noqa: E402
+                 _score_result, _expand_year_only_date,
+                 _normalize_remix_handle, _remix_match_level)
 
 
 # ---------------------------------------------------------------------------
@@ -132,3 +134,153 @@ def test_q_overrides_stale_artist_title():
     assert "Don't Turn It Off" not in norm_title
     assert norm_artist == "Adi Oasis"
     assert "Dumpalltheguns" in norm_title or norm_title  # title derived from q
+
+
+# ---------------------------------------------------------------------------
+# _expand_year_only_date
+# ---------------------------------------------------------------------------
+
+def test_expand_year_only_returns_june_15():
+    """Year-only string is expanded to YYYY-06-15 for scoring purposes."""
+    assert _expand_year_only_date("2019") == "2019-06-15"
+
+
+def test_expand_full_date_unchanged():
+    """Full YYYY-MM-DD date is returned unchanged."""
+    assert _expand_year_only_date("2019-03-22") == "2019-03-22"
+
+
+def test_expand_empty_string_unchanged():
+    """Empty string returns empty string."""
+    assert _expand_year_only_date("") == ""
+
+
+def test_expand_partial_date_unchanged():
+    """Partial date that is not a plain 4-digit year is not expanded."""
+    assert _expand_year_only_date("2019-06") == "2019-06"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_remix_handle
+# ---------------------------------------------------------------------------
+
+def test_normalize_remix_handle_strips_at():
+    """Leading @ in handle-like words is stripped."""
+    assert _normalize_remix_handle("@jitwam Remix") == "jitwam Remix"
+
+
+def test_normalize_remix_handle_no_at_unchanged():
+    """Token without @ is unchanged."""
+    assert _normalize_remix_handle("Jitwam Remix") == "Jitwam Remix"
+
+
+# ---------------------------------------------------------------------------
+# _remix_match_level
+# ---------------------------------------------------------------------------
+
+def test_remix_match_level_identity_and_keyword():
+    """Identity present + remix keyword in result title → level 2."""
+    tokens = ["@jitwam Remix"]
+    assert _remix_match_level(tokens, "dumpalltheguns (jitwam remix)") == 2
+
+
+def test_remix_match_level_identity_only():
+    """Identity present but no remix keyword in result title → level 1."""
+    tokens = ["@jitwam Remix"]
+    # "club" is not in the remix keyword list
+    assert _remix_match_level(tokens, "dumpalltheguns (jitwam club)") == 1
+
+
+def test_remix_match_level_no_match():
+    """Neither identity nor keyword matches → level 0."""
+    tokens = ["@jitwam Remix"]
+    assert _remix_match_level(tokens, "dumpalltheguns original") == 0
+
+
+# ---------------------------------------------------------------------------
+# _score_result – penalty-based model
+# ---------------------------------------------------------------------------
+
+def test_perfect_match_scores_100():
+    """Identical title and artist with no date or remix tokens → 100."""
+    score = _score_result("Adi Oasis", "Dumpalltheguns", "Adi Oasis", "Dumpalltheguns")
+    assert score == 100.0
+
+
+def test_no_query_scores_zero():
+    """Empty title and artist → 0 (nothing to compare)."""
+    score = _score_result("", "", "Some Artist", "Some Title")
+    assert score == 0.0
+
+
+def test_year_only_date_used_for_scoring():
+    """Year-only date_q is expanded internally; exact year match incurs no date penalty."""
+    # Perfect title+artist match, same year → still 100
+    score_same = _score_result(
+        "Adi Oasis", "Dumpalltheguns",
+        "Adi Oasis", "Dumpalltheguns",
+        date_q="2019", res_year="2019",
+    )
+    assert score_same == 100.0
+
+    # Perfect title+artist match, 5-year diff → small date penalty
+    score_diff = _score_result(
+        "Adi Oasis", "Dumpalltheguns",
+        "Adi Oasis", "Dumpalltheguns",
+        date_q="2019", res_year="2024",
+    )
+    assert score_diff < 100.0
+    assert score_diff > 90.0  # date penalty is small relative to full 100
+
+
+def test_at_jitwam_matches_jitwam_in_result():
+    """@jitwam remix token matches 'Jitwam' appearing in result title."""
+    tokens = ["@jitwam Remix"]
+    # All result titles are the same base length so title-similarity effects are equal;
+    # only the remix match level differs.
+    # level 2: identity (jitwam) + remix keyword present → no remix penalty
+    score_full = _score_result(
+        "Adi Oasis", "Dumpalltheguns",
+        "Adi Oasis", "Dumpalltheguns (Jitwam Remix)",
+        remix_tokens=tokens,
+    )
+    # level 1: identity (jitwam) present but no remix keyword → -4 penalty
+    score_identity = _score_result(
+        "Adi Oasis", "Dumpalltheguns",
+        "Adi Oasis", "Dumpalltheguns (Jitwam Club)",
+        remix_tokens=tokens,
+    )
+    # level 0: different identity, no jitwam → -8 penalty
+    score_none = _score_result(
+        "Adi Oasis", "Dumpalltheguns",
+        "Adi Oasis", "Dumpalltheguns (Tom VR Remix)",
+        remix_tokens=tokens,
+    )
+    assert score_full > score_identity > score_none
+
+
+def test_remix_ranking_identity_plus_keyword_beats_identity_only_beats_none():
+    """Result with identity+remix keyword ranks above identity-only, which ranks above no-identity."""
+    tokens = ["@jitwam Remix"]
+    title_q = "Dumpalltheguns"
+    artist_q = "Adi Oasis"
+
+    # level 2: jitwam + remix keyword
+    score_full = _score_result(
+        artist_q, title_q,
+        artist_q, f"{title_q} (Jitwam Remix)",
+        remix_tokens=tokens,
+    )
+    # level 1: jitwam present, no remix keyword ("club" is not a remix keyword)
+    score_identity = _score_result(
+        artist_q, title_q,
+        artist_q, f"{title_q} (Jitwam Club)",
+        remix_tokens=tokens,
+    )
+    # level 0: unrelated remixer
+    score_none = _score_result(
+        artist_q, title_q,
+        artist_q, f"{title_q} (Tom VR Remix)",
+        remix_tokens=tokens,
+    )
+    assert score_full > score_identity > score_none
