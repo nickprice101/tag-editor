@@ -46,6 +46,13 @@ WEB_SEARCH_DEBUG = os.getenv("WEB_SEARCH_DEBUG", "").strip() == "1"
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
+# Browser-like User-Agent used specifically for Bandcamp requests to avoid 403s
+BANDCAMP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+
 # MusicBrainz Picard-standard TXXX field names
 MB_TXXX_FIELDS = [
     "musicbrainz_trackid",
@@ -384,6 +391,16 @@ def set_text_frame(tags, frame_cls, text: str):
 def http_get(url: str, **kwargs):
     headers = kwargs.pop("headers", {})
     headers.setdefault("User-Agent", UA)
+    return requests.get(url, headers=headers, **kwargs)
+
+def bandcamp_get(url: str, **kwargs):
+    """GET helper for Bandcamp that sends browser-like headers to avoid 403s."""
+    headers = kwargs.pop("headers", {})
+    headers.setdefault("User-Agent", BANDCAMP_UA)
+    headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+    headers.setdefault("Referer", "https://bandcamp.com/")
+    headers.setdefault("Cache-Control", "no-cache")
     return requests.get(url, headers=headers, **kwargs)
 
 def quick_tags(path: str) -> dict:
@@ -1707,7 +1724,7 @@ def api_web_search_stream():
         # Bandcamp: scrape the public search page HTML
         yield sse_event("log", "Searching Bandcamp\u2026")
         try:
-            r = http_get(bandcamp_search_url, timeout=15)
+            r = bandcamp_get(bandcamp_search_url, timeout=15)
             bc_html = r.text
             bc_lower = bc_html.lower()
             # HTTP-level diagnostics (always emitted for actionability)
@@ -1729,6 +1746,8 @@ def api_web_search_stream():
                 f"Bandcamp HTTP: status={status_code} len={html_len} "
                 f"ct={content_type!r} final_url={final_url}"
             ))
+            if status_code >= 400:
+                yield sse_event("log", f"Bandcamp is blocking the request (HTTP {status_code}); results may be unavailable.")
             yield sse_event("log", f"Bandcamp markers: {marker_str}")
             if WEB_SEARCH_DEBUG:
                 yield sse_event("log", f"Bandcamp HTML preview: {bc_html[:400]!r}")
