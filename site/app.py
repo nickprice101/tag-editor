@@ -166,6 +166,17 @@ def _similarity(a: str, b: str) -> float:
 # Patterns for query normalisation
 _BRACKET_RE = re.compile(r'\(([^)]*)\)|\[([^\]]*)\]')
 _REMIX_KW_RE = re.compile(r'\b(?:remix|mix|edit|vip|version|bootleg|rework|flip|dub|instrumental|acappella|mashup)\b', re.IGNORECASE)
+# Matches a trailing remix descriptor in a normalised title: an optional dash/em-dash
+# separator followed by one-or-more words ending with a remix keyword, e.g.
+#   " - Artist Remix"  →  removes " - Artist Remix"
+#   " VIP Mix"         →  removes " VIP Mix"
+_TRAILING_REMIX_RE = re.compile(
+    r'(?:'
+    r'\s*[-\u2013\u2014]\s*\w[\w\s]*\b(?:mix|remix|vip|edit|version|bootleg|rework|flip|dub|instrumental|acappella|mashup)\b'
+    r'|\s+(?:\w+\s+)?(?:mix|remix|vip|edit|version|bootleg|rework|flip|dub|instrumental|acappella|mashup)\b'
+    r')\s*$',
+    re.IGNORECASE,
+)
 _FEAT_RE = re.compile(
     r'\s*[\(\[]?(?:feat(?:uring)?|ft)\.?\s+[^\)\]]+[\)\]]?'
     r'|\s+(?:with|w/)\s+[^,\(\[]+',
@@ -199,6 +210,32 @@ def normalize_search_query(title: str, artist: str = "") -> tuple:
     clean_artist = re.sub(r'\s+', ' ', clean_artist).strip(" -,")
 
     return clean_title, clean_artist, remix_tokens
+
+
+def _build_retry_query(norm_artist: str, norm_title: str) -> str:
+    """Build a stripped search query for per-site remix retry.
+
+    Used when a store search yields zero structured results: removes trailing
+    remix descriptors from *norm_title* (e.g. '- Artist Remix', 'VIP Mix') so
+    the retry casts a broader net.  Identity words are intentionally NOT
+    appended; this returns the plain ``artist title`` lowercase string.
+
+    Returns an empty string if both inputs are empty.
+    """
+    stripped = _TRAILING_REMIX_RE.sub("", norm_title).strip(" -,")
+    return f"{norm_artist} {stripped}".strip().lower()
+
+
+def _site_search_url(site_name: str, qq: str) -> str:
+    """Return the search URL for a named store with an encoded query string."""
+    if site_name == "Beatport":
+        return f"https://www.beatport.com/search/tracks?q={qq}"
+    if site_name == "Traxsource":
+        return f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"
+    if site_name == "Juno":
+        return f"https://www.junodownload.com/search/?solrorder=relevancy&q%5Btitle%5D%5B0%5D={qq}"
+    return ""
+
 
 def _split_query_artist_title(q: str) -> tuple:
     """Split a free-form query string into (artist, title) when it matches
@@ -1902,6 +1939,7 @@ def api_web_search_stream():
             norm_q = f"{norm_q} {' '.join(dict.fromkeys(_identity_words))}".strip()
 
     norm_q_out = norm_q.lower()
+    retry_q_out = _build_retry_query(norm_artist, norm_title)
 
     def generate():
         if not q:
@@ -1972,6 +2010,25 @@ def api_web_search_stream():
                             yield sse_event("log", f"{site_name} headless: no structured results found")
                     except Exception as _hl_exc:
                         yield sse_event("log", f"{site_name} headless: failed \u2014 {str(_hl_exc)[:120]}")
+                # Per-site remix-retry: if both normal and headless found no structured
+                # results, retry with remix descriptors stripped from the query.
+                if not any(not x.get("is_fallback") for x in found) and retry_q_out and retry_q_out != norm_q_out:
+                    _retry_qq = requests.utils.quote(retry_q_out, safe="")
+                    _retry_url = _site_search_url(site_name, _retry_qq)
+                    if _retry_url:
+                        yield sse_event("log", f"{site_name}: retrying without remix \u2014 {norm_q_out!r} \u2192 {retry_q_out!r}")
+                        try:
+                            _r_retry = http_get(_retry_url, timeout=15)
+                            _retry_found = _parse_web_search_results(
+                                site_name, _retry_url, _r_retry.text,
+                                norm_artist, norm_title, year, date, remix_tokens,
+                            )
+                            _retry_non_fb = [x for x in _retry_found if not x.get("is_fallback")]
+                            if _retry_non_fb:
+                                found = _retry_found
+                                yield sse_event("log", f"{site_name}: retry found {len(_retry_non_fb)} result(s)")
+                        except Exception as _retry_exc:
+                            yield sse_event("log", f"{site_name}: retry failed \u2014 {str(_retry_exc)[:80]}")
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
                 non_fb = [x for x in found if not x.get("is_fallback")]
                 # De-duplicate within source by URL
@@ -2053,6 +2110,28 @@ def api_web_search_stream():
                         yield sse_event("log", "Bandcamp headless: no structured results found")
                 except Exception as _bc_hl_exc:
                     yield sse_event("log", f"Bandcamp headless: failed \u2014 {str(_bc_hl_exc)[:120]}")
+            # Per-site remix-retry for Bandcamp: if both normal and headless found no
+            # structured results, retry with remix descriptors stripped from the query.
+            if not any(not x.get("is_fallback") for x in found) and retry_q_out and retry_q_out != norm_q_out:
+                _bc_retry_qq = requests.utils.quote(retry_q_out, safe="")
+                _bc_retry_url = f"https://bandcamp.com/search?q={_bc_retry_qq}&item_type=t"
+                yield sse_event("log", f"Bandcamp: retrying without remix \u2014 {norm_q_out!r} \u2192 {retry_q_out!r}")
+                try:
+                    _bc_r_retry = bandcamp_get(_bc_retry_url, timeout=15)
+                    _bc_retry_debug: list = []
+                    _bc_retry_found = _parse_web_search_results(
+                        "Bandcamp", _bc_retry_url, _bc_r_retry.text,
+                        norm_artist, norm_title, year, date, remix_tokens,
+                        _debug_info=_bc_retry_debug,
+                    )
+                    for msg in _bc_retry_debug:
+                        yield sse_event("log", f"Bandcamp retry: {msg}")
+                    _bc_retry_non_fb = [x for x in _bc_retry_found if not x.get("is_fallback")]
+                    if _bc_retry_non_fb:
+                        found = _bc_retry_found
+                        yield sse_event("log", f"Bandcamp: retry found {len(_bc_retry_non_fb)} result(s)")
+                except Exception as _bc_retry_exc:
+                    yield sse_event("log", f"Bandcamp: retry failed \u2014 {str(_bc_retry_exc)[:80]}")
             yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
             non_fb = [x for x in found if not x.get("is_fallback")]
             deduped = _deduplicate_by_url(non_fb)

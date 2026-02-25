@@ -55,7 +55,8 @@ sys.modules["PIL.Image"] = img_mod
 from app import (_split_query_artist_title, normalize_search_query,  # noqa: E402
                  _score_result, _expand_year_only_date,
                  _normalize_remix_handle, _remix_match_level,
-                 obfuscate_key, _REMIX_KW_RE, re)
+                 obfuscate_key, _REMIX_KW_RE, re,
+                 _build_retry_query, _site_search_url)
 
 
 # ---------------------------------------------------------------------------
@@ -380,4 +381,91 @@ def test_remix_identity_words_in_norm_q():
     assert "jitwam" in norm_q
     assert "Adi Oasis" in norm_q
     assert "Dumpalltheguns" in norm_q
+
+
+# ---------------------------------------------------------------------------
+# _build_retry_query
+# ---------------------------------------------------------------------------
+
+def test_build_retry_query_strips_bare_remix_keyword():
+    """Trailing bare remix keyword is removed."""
+    assert _build_retry_query("Artist", "Song Remix") == "artist song"
+
+
+def test_build_retry_query_strips_identity_and_remix():
+    """Trailing 'Remixer Remix' segment is removed."""
+    assert _build_retry_query("Adi Oasis", "Dumpalltheguns DJ Remix") == "adi oasis dumpalltheguns"
+
+
+def test_build_retry_query_strips_dash_separated_remix():
+    """'- Remixer Remix' dash-separated trailing segment is removed."""
+    assert _build_retry_query("Artist", "Song Title - Someone Remix") == "artist song title"
+
+
+def test_build_retry_query_strips_vip():
+    """Trailing 'VIP' descriptor is removed."""
+    assert _build_retry_query("Artist", "Song VIP") == "artist song"
+
+
+def test_build_retry_query_strips_vip_mix():
+    """Trailing 'VIP Mix' descriptor is removed."""
+    assert _build_retry_query("Artist", "Song Title VIP Mix") == "artist song title"
+
+
+def test_build_retry_query_no_remix_unchanged():
+    """Title with no trailing remix keyword is returned unchanged (lowercased)."""
+    assert _build_retry_query("Adi Oasis", "Dumpalltheguns") == "adi oasis dumpalltheguns"
+
+
+def test_build_retry_query_is_lowercase():
+    """Result is always lowercase."""
+    result = _build_retry_query("Adi Oasis", "Dumpalltheguns Remix")
+    assert result == result.lower()
+
+
+def test_build_retry_query_does_not_strip_internal_remix():
+    """A remix keyword that is NOT trailing is preserved."""
+    # "Remix EP" does not end with a bare remix keyword (it ends with "EP")
+    result = _build_retry_query("Artist", "Remix EP")
+    assert "remix" in result
+
+
+def test_build_retry_query_empty_inputs():
+    """Empty inputs return empty string."""
+    assert _build_retry_query("", "") == ""
+
+
+def test_build_retry_query_artist_only():
+    """Only artist, no title: returns lowercased artist."""
+    assert _build_retry_query("Adi Oasis", "") == "adi oasis"
+
+
+# ---------------------------------------------------------------------------
+# _site_search_url
+# ---------------------------------------------------------------------------
+
+def test_site_search_url_beatport():
+    """Beatport URL contains the encoded query."""
+    url = _site_search_url("Beatport", "test+query")
+    assert url == "https://www.beatport.com/search/tracks?q=test+query"
+
+
+def test_site_search_url_traxsource():
+    """Traxsource URL contains the encoded query."""
+    url = _site_search_url("Traxsource", "test+query")
+    assert "test+query" in url
+    assert "traxsource.com" in url
+
+
+def test_site_search_url_juno():
+    """Juno URL contains the encoded query."""
+    url = _site_search_url("Juno", "test+query")
+    assert "test+query" in url
+    assert "junodownload.com" in url
+
+
+def test_site_search_url_unknown_returns_empty():
+    """Unknown site name returns empty string."""
+    assert _site_search_url("Unknown", "q") == ""
+
 
