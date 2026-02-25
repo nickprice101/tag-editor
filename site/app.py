@@ -23,6 +23,13 @@ from mutagen.id3 import (
 from mutagen.mp3 import MP3
 from PIL import Image
 
+try:
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _sync_playwright = None  # type: ignore[assignment]
+    _PLAYWRIGHT_AVAILABLE = False
+
 APP_USER = os.getenv("APP_USER", "")
 APP_PASS = os.getenv("APP_PASS", "")
 MUSIC_ROOT = os.getenv("MUSIC_ROOT", "/mnt/HD/HD_a2/Media/Music").rstrip("/")
@@ -43,6 +50,10 @@ ACOUSTID_KEY = os.getenv("ACOUSTID_KEY", "").strip()
 # Set WEB_SEARCH_DEBUG=1 to enable verbose Bandcamp diagnostic SSE logs
 # (HTML previews, node snippets).  Off by default to avoid noise.
 WEB_SEARCH_DEBUG = os.getenv("WEB_SEARCH_DEBUG", "").strip() == "1"
+# Headless browser fallback configuration
+HEADLESS_ENABLED = os.getenv("HEADLESS_ENABLED", "1").strip() not in ("0", "false", "no")
+HEADLESS_TIMEOUT_SECS = int(os.getenv("HEADLESS_TIMEOUT_SECS", "15"))
+HEADLESS_MAX_RESULTS = int(os.getenv("HEADLESS_MAX_RESULTS", "10"))
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
@@ -402,6 +413,47 @@ def bandcamp_get(url: str, **kwargs):
     headers.setdefault("Referer", "https://bandcamp.com/")
     headers.setdefault("Cache-Control", "no-cache")
     return requests.get(url, headers=headers, **kwargs)
+
+def _headless_get_html(url: str, timeout_secs: int = None, *, _browser=None) -> str:
+    """Fetch a fully-rendered page using headless Chromium via Playwright.
+
+    When *_browser* is a Playwright Browser instance it is reused (caller is
+    responsible for its lifecycle).  When None, a new browser is launched and
+    closed automatically.
+
+    Raises RuntimeError if Playwright is not installed.
+    """
+    if timeout_secs is None:
+        timeout_secs = HEADLESS_TIMEOUT_SECS
+    if not _PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError(
+            "Playwright not installed; run: pip install playwright && playwright install chromium"
+        )
+    own_browser = _browser is None
+    pw = None
+    if own_browser:
+        pw = _sync_playwright().start()
+        browser = pw.chromium.launch(headless=True)
+    else:
+        browser = _browser
+    context = browser.new_context(
+        user_agent=BANDCAMP_UA,
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+    )
+    try:
+        page = context.new_page()
+        try:
+            page.goto(url, timeout=timeout_secs * 1000, wait_until="domcontentloaded")
+            return page.content()
+        finally:
+            page.close()
+    finally:
+        context.close()
+        if own_browser:
+            browser.close()
+            if pw is not None:
+                pw.stop()
+
 
 def quick_tags(path: str) -> dict:
     """Lightweight metadata extraction cached by (path, mtime)."""
@@ -1699,82 +1751,165 @@ def api_web_search_stream():
         ]
         bandcamp_search_url = f"https://bandcamp.com/search?q={qq}&item_type=t"
         results_by_source = {}
-        for site_name, search_url in html_sites:
-            yield sse_event("log", f"Searching {site_name}\u2026")
-            try:
-                r = http_get(search_url, timeout=15)
-                found = _parse_web_search_results(
-                    site_name, search_url, r.text,
-                    norm_artist, norm_title, year, date, remix_tokens,
+        # Lazy-initialized shared Playwright browser for headless fallbacks within this request.
+        # Using a list so the nested closure can rebind the reference.
+        _hl_pw = [None]
+        _hl_browser = [None]
+        def _ensure_hl_browser():
+            if not _PLAYWRIGHT_AVAILABLE:
+                raise RuntimeError(
+                    "Playwright not installed; install playwright and run 'playwright install chromium'"
                 )
+            if _hl_browser[0] is None:
+                _hl_pw[0] = _sync_playwright().start()
+                _hl_browser[0] = _hl_pw[0].chromium.launch(headless=True)
+            return _hl_browser[0]
+        try:
+            for site_name, search_url in html_sites:
+                yield sse_event("log", f"Searching {site_name}\u2026")
+                _site_headless_reason = ""
+                try:
+                    r = http_get(search_url, timeout=15)
+                    found = _parse_web_search_results(
+                        site_name, search_url, r.text,
+                        norm_artist, norm_title, year, date, remix_tokens,
+                    )
+                    if site_name in ("Juno", "Traxsource"):
+                        if r.status_code in (403, 429) or r.status_code >= 500:
+                            _site_headless_reason = f"HTTP {r.status_code}"
+                        elif all(x.get("is_fallback") for x in found):
+                            _site_headless_reason = "no structured results"
+                except Exception as exc:
+                    yield sse_event("log", f"{site_name}: error \u2014 {str(exc)[:120]}")
+                    found = [{"source": site_name, "title": f"View search results on {site_name}",
+                              "artist": "", "url": search_url, "score": 0.0,
+                              "note": "Search failed; open manually.",
+                              "direct_url": False, "is_fallback": True}]
+                    if site_name in ("Juno", "Traxsource"):
+                        _site_headless_reason = f"error \u2014 {str(exc)[:60]}"
+                # Headless fallback for Juno / Traxsource
+                if HEADLESS_ENABLED and _site_headless_reason:
+                    yield sse_event("log", f"{site_name}: scraping failed ({_site_headless_reason}) \u2014 switching to headless")
+                    try:
+                        _hl_html = _headless_get_html(search_url, HEADLESS_TIMEOUT_SECS,
+                                                      _browser=_ensure_hl_browser())
+                        if WEB_SEARCH_DEBUG:
+                            yield sse_event("log", f"{site_name} headless HTML preview: {_hl_html[:400]!r}")
+                        _hl_found = _parse_web_search_results(
+                            site_name, search_url, _hl_html,
+                            norm_artist, norm_title, year, date, remix_tokens,
+                        )
+                        _hl_non_fb = [x for x in _hl_found if not x.get("is_fallback")]
+                        if _hl_non_fb:
+                            found = _hl_found[:HEADLESS_MAX_RESULTS]
+                            yield sse_event("log", f"{site_name} headless: {len(_hl_non_fb)} result(s)")
+                        else:
+                            yield sse_event("log", f"{site_name} headless: no structured results found")
+                    except Exception as _hl_exc:
+                        yield sse_event("log", f"{site_name} headless: failed \u2014 {str(_hl_exc)[:120]}")
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
+                non_fb = [x for x in found if not x.get("is_fallback")]
+                # De-duplicate within source by URL
+                deduped = _deduplicate_by_url(non_fb)
+                results_by_source[site_name] = (
+                    sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
+                    if deduped else found[:1]
+                )
+            # Bandcamp: scrape the public search page HTML
+            yield sse_event("log", "Searching Bandcamp\u2026")
+            _bc_headless_reason = ""  # non-empty signals that headless should be attempted
+            try:
+                r = bandcamp_get(bandcamp_search_url, timeout=15)
+                bc_html = r.text
+                bc_lower = bc_html.lower()
+                # HTTP-level diagnostics (always emitted for actionability)
+                final_url = r.url
+                status_code = r.status_code
+                content_type = r.headers.get("content-type", "")
+                html_len = len(bc_html)
+                markers = {
+                    "searchresult":            "searchresult" in bc_lower,
+                    "itemurl":                 "itemurl" in bc_lower,
+                    "bandcamp.com/track/":     "bandcamp.com/track/" in bc_lower,
+                    "captcha":                 "captcha" in bc_lower,
+                    "cloudflare":              "cloudflare" in bc_lower,
+                    "enable javascript":       "enable javascript" in bc_lower,
+                    "consent":                 "consent" in bc_lower,
+                }
+                marker_str = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in markers.items())
+                yield sse_event("log", (
+                    f"Bandcamp HTTP: status={status_code} len={html_len} "
+                    f"ct={content_type!r} final_url={final_url}"
+                ))
+                if status_code >= 400:
+                    yield sse_event("log", f"Bandcamp is blocking the request (HTTP {status_code}); results may be unavailable.")
+                    _bc_headless_reason = f"HTTP {status_code}"
+                yield sse_event("log", f"Bandcamp markers: {marker_str}")
+                if WEB_SEARCH_DEBUG:
+                    yield sse_event("log", f"Bandcamp HTML preview: {bc_html[:400]!r}")
+                bc_debug: list = []
+                found = _parse_web_search_results(
+                    "Bandcamp", bandcamp_search_url, bc_html,
+                    norm_artist, norm_title, year, date, remix_tokens,
+                    _debug_info=bc_debug,
+                )
+                for msg in bc_debug:
+                    yield sse_event("log", msg)
+                if not _bc_headless_reason and all(x.get("is_fallback") for x in found):
+                    _bc_headless_reason = "no structured results"
             except Exception as exc:
-                yield sse_event("log", f"{site_name}: error \u2014 {str(exc)[:120]}")
-                found = [{"source": site_name, "title": f"View search results on {site_name}",
-                          "artist": "", "url": search_url, "score": 0.0,
+                yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")
+                found = [{"source": "Bandcamp", "title": "View search results on Bandcamp",
+                          "artist": "", "url": bandcamp_search_url, "score": 0.0,
                           "note": "Search failed; open manually.",
                           "direct_url": False, "is_fallback": True}]
+                _bc_headless_reason = f"error \u2014 {str(exc)[:60]}"
+            # Headless fallback for Bandcamp
+            if HEADLESS_ENABLED and _bc_headless_reason:
+                yield sse_event("log", f"Bandcamp: scraping failed ({_bc_headless_reason}) \u2014 switching to headless")
+                try:
+                    _bc_hl_html = _headless_get_html(bandcamp_search_url, HEADLESS_TIMEOUT_SECS,
+                                                     _browser=_ensure_hl_browser())
+                    if WEB_SEARCH_DEBUG:
+                        yield sse_event("log", f"Bandcamp headless HTML preview: {_bc_hl_html[:400]!r}")
+                    _bc_hl_debug: list = []
+                    _bc_hl_found = _parse_web_search_results(
+                        "Bandcamp", bandcamp_search_url, _bc_hl_html,
+                        norm_artist, norm_title, year, date, remix_tokens,
+                        _debug_info=_bc_hl_debug,
+                    )
+                    for msg in _bc_hl_debug:
+                        yield sse_event("log", f"Bandcamp headless: {msg}")
+                    _bc_hl_non_fb = [x for x in _bc_hl_found if not x.get("is_fallback")]
+                    if _bc_hl_non_fb:
+                        found = _bc_hl_found[:HEADLESS_MAX_RESULTS]
+                        yield sse_event("log", f"Bandcamp headless: {len(_bc_hl_non_fb)} result(s)")
+                    else:
+                        yield sse_event("log", "Bandcamp headless: no structured results found")
+                except Exception as _bc_hl_exc:
+                    yield sse_event("log", f"Bandcamp headless: failed \u2014 {str(_bc_hl_exc)[:120]}")
+            yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
             non_fb = [x for x in found if not x.get("is_fallback")]
-            # De-duplicate within source by URL
             deduped = _deduplicate_by_url(non_fb)
-            results_by_source[site_name] = (
+            results_by_source["Bandcamp"] = (
                 sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
                 if deduped else found[:1]
             )
-        # Bandcamp: scrape the public search page HTML
-        yield sse_event("log", "Searching Bandcamp\u2026")
-        try:
-            r = bandcamp_get(bandcamp_search_url, timeout=15)
-            bc_html = r.text
-            bc_lower = bc_html.lower()
-            # HTTP-level diagnostics (always emitted for actionability)
-            final_url = r.url
-            status_code = r.status_code
-            content_type = r.headers.get("content-type", "")
-            html_len = len(bc_html)
-            markers = {
-                "searchresult":            "searchresult" in bc_lower,
-                "itemurl":                 "itemurl" in bc_lower,
-                "bandcamp.com/track/":     "bandcamp.com/track/" in bc_lower,
-                "captcha":                 "captcha" in bc_lower,
-                "cloudflare":              "cloudflare" in bc_lower,
-                "enable javascript":       "enable javascript" in bc_lower,
-                "consent":                 "consent" in bc_lower,
-            }
-            marker_str = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in markers.items())
-            yield sse_event("log", (
-                f"Bandcamp HTTP: status={status_code} len={html_len} "
-                f"ct={content_type!r} final_url={final_url}"
-            ))
-            if status_code >= 400:
-                yield sse_event("log", f"Bandcamp is blocking the request (HTTP {status_code}); results may be unavailable.")
-            yield sse_event("log", f"Bandcamp markers: {marker_str}")
-            if WEB_SEARCH_DEBUG:
-                yield sse_event("log", f"Bandcamp HTML preview: {bc_html[:400]!r}")
-            bc_debug: list = []
-            found = _parse_web_search_results(
-                "Bandcamp", bandcamp_search_url, bc_html,
-                norm_artist, norm_title, year, date, remix_tokens,
-                _debug_info=bc_debug,
-            )
-            for msg in bc_debug:
-                yield sse_event("log", msg)
-            yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
-        except Exception as exc:
-            yield sse_event("log", f"Bandcamp: error \u2014 {str(exc)[:120]}")
-            found = [{"source": "Bandcamp", "title": "View search results on Bandcamp",
-                      "artist": "", "url": bandcamp_search_url, "score": 0.0,
-                      "note": "Search failed; open manually.",
-                      "direct_url": False, "is_fallback": True}]
-        non_fb = [x for x in found if not x.get("is_fallback")]
-        deduped = _deduplicate_by_url(non_fb)
-        results_by_source["Bandcamp"] = (
-            sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
-            if deduped else found[:1]
-        )
-        total = sum(len(v) for v in results_by_source.values())
-        yield sse_event("log", f"Total {total} results across {len(results_by_source)} sources")
-        yield sse_event("result", json.dumps({"results_by_source": _truncate_results_by_source(results_by_source)}))
+            total = sum(len(v) for v in results_by_source.values())
+            yield sse_event("log", f"Total {total} results across {len(results_by_source)} sources")
+            yield sse_event("result", json.dumps({"results_by_source": _truncate_results_by_source(results_by_source)}))
+        finally:
+            # Close shared headless browser if it was opened for this request
+            if _hl_browser[0] is not None:
+                try:
+                    _hl_browser[0].close()
+                except Exception:
+                    pass
+            if _hl_pw[0] is not None:
+                try:
+                    _hl_pw[0].stop()
+                except Exception:
+                    pass
 
     return sse_response(generate())
 
