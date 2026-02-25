@@ -54,7 +54,8 @@ sys.modules["PIL.Image"] = img_mod
 
 from app import (_split_query_artist_title, normalize_search_query,  # noqa: E402
                  _score_result, _expand_year_only_date,
-                 _normalize_remix_handle, _remix_match_level)
+                 _normalize_remix_handle, _remix_match_level,
+                 obfuscate_key, _REMIX_KW_RE, re)
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +285,59 @@ def test_remix_ranking_identity_plus_keyword_beats_identity_only_beats_none():
         remix_tokens=tokens,
     )
     assert score_full > score_identity > score_none
+
+
+# ---------------------------------------------------------------------------
+# obfuscate_key
+# ---------------------------------------------------------------------------
+
+def test_obfuscate_key_long_key_shows_eight_x_prefix():
+    """A key longer than 8 chars shows exactly 8 x's then the last 8 chars."""
+    key = "abcdefghijklmnop"  # 16 chars
+    result = obfuscate_key(key)
+    assert result == "xxxxxxxxijklmnop"
+
+
+def test_obfuscate_key_short_key_returned_unchanged():
+    """A key of 8 chars or fewer is returned as-is."""
+    assert obfuscate_key("abcd1234") == "abcd1234"
+    assert obfuscate_key("xxxx") == "xxxx"
+
+
+def test_obfuscate_key_empty_returns_empty():
+    """Empty string returns empty string."""
+    assert obfuscate_key("") == ""
+
+
+def test_obfuscate_key_40char_discogs_token():
+    """A 40-char Discogs token is displayed as 8 x's + last 8 chars."""
+    token = "A" * 32 + "abcd1234"
+    result = obfuscate_key(token)
+    assert result == "xxxxxxxxabcd1234"
+
+
+# ---------------------------------------------------------------------------
+# remix identity words are included in norm_q
+# ---------------------------------------------------------------------------
+
+def test_remix_identity_words_in_norm_q():
+    """Remix identity words extracted from tokens are appended to norm_q."""
+    q = "Adi Oasis \u2013 Dumpalltheguns (@jitwam Remix)"
+    q_artist, q_title = _split_query_artist_title(q)
+    norm_title, norm_artist, remix_tokens = normalize_search_query(q_title, q_artist)
+    # Build norm_q the same way api_web_search_stream does
+    norm_q = f"{norm_artist} {norm_title}".strip()
+    if remix_tokens:
+        identity_words = []
+        for tok in remix_tokens:
+            norm = _normalize_remix_handle(tok).lower()
+            identity_words.extend(
+                w for w in re.findall(r'\w+', norm)
+                if not _REMIX_KW_RE.match(w) and len(w) > 2
+            )
+        if identity_words:
+            norm_q = f"{norm_q} {' '.join(dict.fromkeys(identity_words))}".strip()
+    assert "jitwam" in norm_q
+    assert "Adi Oasis" in norm_q
+    assert "Dumpalltheguns" in norm_q
+
