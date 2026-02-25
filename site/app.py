@@ -1477,27 +1477,69 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     results.append(entry)
 
     elif site == "Traxsource":
-        for item in soup.find_all("li", class_=re.compile(r"trk-row")):
-            title_el = item.find(class_="title")
-            artist_el = item.find(class_=re.compile(r"artists?"))
-            link_el = item.find("a", href=re.compile(r"/title/"))
-            img_el = item.find("img", src=True)
-            t = title_el.get_text(strip=True) if title_el else ""
-            a = artist_el.get_text(strip=True) if artist_el else ""
+        for item in soup.find_all("div", class_=re.compile(r"\btrk-row\b")):
+            if "play-trk" not in (item.get("class") or []):
+                continue
+            # Thumbnail
+            thumb_cell = item.find("div", class_="thumb")
+            img_el = thumb_cell.find("img", src=True) if thumb_cell else None
             thumb = img_el["src"] if img_el else ""
-            if t and link_el:
-                url = "https://www.traxsource.com" + link_el["href"]
-                # release_type/track_count not available from HTML; detect via artist name only
-                score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
-                        _compilation_penalty(a)
-                entry = {
-                    "source": "Traxsource", "title": t, "artist": a,
-                    "url": url, "score": round(max(0.0, score), 1),
-                    "direct_url": True, "is_fallback": False,
-                }
-                if thumb:
-                    entry["thumb"] = thumb
-                results.append(entry)
+            # Track URL and title
+            title_cell = item.find("div", class_="title")
+            link_el = title_cell.find("a", href=True) if title_cell else None
+            if not link_el:
+                continue
+            raw_href = link_el["href"]
+            url = raw_href if raw_href.startswith("http") else "https://www.traxsource.com" + raw_href
+            # Version/remix from span.version (strip trailing duration like "(4:38)")
+            version_el = title_cell.find("span", class_="version") if title_cell else None
+            version_text = ""
+            if version_el:
+                version_text = re.sub(r"\s*\(\d+:\d+\)\s*$", "", version_el.get_text(strip=True)).strip()
+            # Base title: link text minus any nested version span text
+            raw_link_text = link_el.get_text(strip=True)
+            if version_el:
+                ver_raw = version_el.get_text(strip=True)
+                if raw_link_text.endswith(ver_raw):
+                    raw_link_text = raw_link_text[:-len(ver_raw)].strip()
+            t = f"{raw_link_text} ({version_text})" if version_text else raw_link_text
+            if not t:
+                continue
+            # Artists
+            artists_cell = item.find("div", class_="artists")
+            a = ", ".join(
+                a_el.get_text(strip=True)
+                for a_el in (artists_cell.find_all("a") if artists_cell else [])
+            )
+            # Label
+            label_cell = item.find("div", class_="label")
+            label_el = label_cell.find("a") if label_cell else None
+            label = label_el.get_text(strip=True) if label_el else ""
+            # Genre (take first segment if contains " / ")
+            genre_cell = item.find("div", class_="genre")
+            genre_el = genre_cell.find("a") if genre_cell else None
+            genre_raw = genre_el.get_text(strip=True) if genre_el else ""
+            genre = genre_raw.split(" / ")[0] if " / " in genre_raw else genre_raw
+            # Release date
+            rdate_cell = item.find("div", class_="r-date")
+            released = rdate_cell.get_text(strip=True) if rdate_cell else ""
+            # Score
+            score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens) + \
+                    _compilation_penalty(a)
+            entry = {
+                "source": "Traxsource", "title": t, "artist": a,
+                "url": url, "score": round(max(0.0, score), 1),
+                "direct_url": True, "is_fallback": False,
+            }
+            if thumb:
+                entry["thumb"] = thumb
+            if released:
+                entry["released"] = released
+            if label:
+                entry["label"] = label
+            if genre:
+                entry["genre"] = genre
+            results.append(entry)
 
     elif site == "Beatport":
         next_data = soup.find("script", id="__NEXT_DATA__")
