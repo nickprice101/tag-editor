@@ -1901,12 +1901,14 @@ def api_web_search_stream():
         if _identity_words:
             norm_q = f"{norm_q} {' '.join(dict.fromkeys(_identity_words))}".strip()
 
+    norm_q_out = norm_q.lower()
+
     def generate():
         if not q:
             yield sse_event("apierror", "Provide a query.")
             return
-        yield sse_event("log", f"Query: q={q!r} \u2192 artist={norm_artist!r}, title={norm_title!r}, norm_q={norm_q!r}")
-        qq = requests.utils.quote(norm_q, safe="")
+        qq = requests.utils.quote(norm_q_out, safe="")
+        yield sse_event("log", f"Query: q={q!r} \u2192 norm_q={norm_q!r} \u2192 norm_q_out={norm_q_out!r} \u2192 qq={qq!r}")
         html_sites = [
             ("Beatport",    f"https://www.beatport.com/search/tracks?q={qq}"),
             ("Traxsource",  f"https://www.traxsource.com/search?term={qq}&page=1&type=tracks"),
