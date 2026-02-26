@@ -18,7 +18,8 @@ from flask import Flask, request, Response, jsonify
 from mutagen.id3 import (
     ID3, ID3NoHeaderError,
     TIT2, TPE1, TALB, TPE2, TCON, TRCK, TPUB, COMM, TDRC, TYER,
-    TXXX, TSOP, TSO2, APIC, TBPM
+    TXXX, TSOP, TSO2, APIC, TBPM, TMED, TPOS, TCMP, TDOR, TORY,
+    UFID, TIPL, TSSE
 )
 from mutagen.mp3 import MP3
 from PIL import Image
@@ -665,6 +666,10 @@ def upsert_id3(mp3_path: str, fields: dict):
     set_text_frame(tags, TCON, fields.get("genre"))
     set_text_frame(tags, TRCK, fields.get("track"))
     set_text_frame(tags, TPUB, fields.get("publisher"))
+    set_text_frame(tags, TMED, fields.get("media_type"))
+    set_text_frame(tags, TPOS, fields.get("part_of_a_set"))
+    set_text_frame(tags, TCMP, fields.get("part_of_a_compilation"))
+    set_text_frame(tags, TSSE, fields.get("encoder_settings"))
 
     bpm_raw = (fields.get("bpm") or "").strip()
     if bpm_raw:
@@ -699,9 +704,19 @@ def upsert_id3(mp3_path: str, fields: dict):
         set_txxx(tags, "year", "")
 
     set_txxx(tags, "original_year", original_year)
+    if original_year:
+        tags.setall("TDOR", [TDOR(encoding=3, text=[original_year])])
+        tags.setall("TORY", [TORY(encoding=3, text=[original_year])])
+    else:
+        tags.delall("TDOR")
+        tags.delall("TORY")
 
     involved = normalize_involved_people(fields.get("involved_people_list") or "")
     set_txxx(tags, "involved_people_list", involved)
+    if involved:
+        tags.setall("TIPL", [TIPL(encoding=3, text=[involved])])
+    else:
+        tags.delall("TIPL")
 
     artist_sort = (fields.get("artist_sort") or "").strip()
     albumartist_sort = (fields.get("albumartist_sort") or "").strip()
@@ -713,6 +728,12 @@ def upsert_id3(mp3_path: str, fields: dict):
         tags.setall("TSO2", [TSO2(encoding=3, text=[albumartist_sort])])
     else:
         tags.delall("TSO2")
+
+    unique_file_identifier = (fields.get("unique_file_identifier") or "").strip()
+    if unique_file_identifier:
+        tags.setall("UFID", [UFID(owner="StarbuckRadio", data=unique_file_identifier.encode("utf-8"))])
+    else:
+        tags.delall("UFID")
 
     # extra fields
     set_txxx(tags, "label", fields.get("label", ""))
@@ -743,6 +764,14 @@ def read_tags_and_audio(mp3_path: str) -> dict:
     if tags.getall("COMM") and tags.getall("COMM")[0].text:
         comm = str(tags.getall("COMM")[0].text[0])
 
+    ufid = ""
+    for frame in tags.getall("UFID"):
+        if getattr(frame, "owner", "") == "StarbuckRadio":
+            ufid = frame.data.decode("utf-8", errors="ignore").strip()
+            break
+    if not ufid and tags.getall("UFID"):
+        ufid = tags.getall("UFID")[0].data.decode("utf-8", errors="ignore").strip()
+
     return {
         "path": mp3_path,
         "title": get_text(tags, "TIT2"),
@@ -755,9 +784,15 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "comment": comm,
         "date": get_text(tags, "TDRC"),
         "year": extract_year(tags),
-        "original_year": get_txxx(tags, "original_year"),
+        "original_year": get_text(tags, "TDOR") or get_text(tags, "TORY") or get_txxx(tags, "original_year"),
         "artist_sort": get_text(tags, "TSOP"),
         "albumartist_sort": get_text(tags, "TSO2"),
+        "media_type": get_text(tags, "TMED"),
+        "part_of_a_set": get_text(tags, "TPOS"),
+        "part_of_a_compilation": get_text(tags, "TCMP"),
+        "unique_file_identifier": ufid,
+        "encoder_settings": get_text(tags, "TSSE"),
+        "involved": get_text(tags, "TIPL"),
         "involved_people_list": get_txxx(tags, "involved_people_list"),
         "label": get_txxx(tags, "label"),
         "catalog_number": get_txxx(tags, "catalog_number"),
@@ -3063,7 +3098,7 @@ def ui_home():
         <div class="field-group">
           <label>Involved people list</label>
           <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
-          <div class="hint">Stored as <span class="mono">TXXX:involved_people_list</span></div>
+          <div class="hint">Stored as <span class="mono">TIPL</span> and <span class="mono">TXXX:involved_people_list</span></div>
         </div>
       </div>
 
@@ -3081,7 +3116,12 @@ def ui_home():
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
+          <div class="field-group"><label>Part of set</label><input name="part_of_a_set" placeholder="1/2"/></div>
+        </div>
+        <div class="field-grid-3">
           <div class="field-group"><label>BPM</label><input name="bpm" placeholder="(optional)"/></div>
+          <div class="field-group"><label>Media type</label><input name="media_type" placeholder="Digital Media"/></div>
+          <div class="field-group"><label>Compilation flag</label><input name="part_of_a_compilation" placeholder="0 or 1"/></div>
         </div>
         <div class="hint">BPM stored as <span class="mono">TBPM</span> (decimals truncated; non-numeric ignored)</div>
       </div>
@@ -3117,6 +3157,8 @@ def ui_home():
         <div class="field-grid-2">
           <div class="field-group"><label>Publisher</label><input name="publisher" placeholder="(optional)"/></div>
           <div class="field-group"><label>Comment</label><textarea name="comment" rows="3" placeholder="(optional)"></textarea></div>
+          <div class="field-group"><label>Encoder settings</label><input name="encoder_settings" placeholder="LAME3.100"/></div>
+          <div class="field-group"><label>Unique file ID</label><input name="unique_file_identifier" placeholder="(optional)"/></div>
         </div>
       </div>
 
@@ -3264,8 +3306,8 @@ function updateAllRevertUI() {{
 
 function setBaseline(data) {{
   const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number","bpm","art_url",...MB_FIELDS];
+    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
+    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS];
   _baseline = {{}};
   for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
   document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
@@ -3316,7 +3358,7 @@ async function applyBulkEdits() {{
     if(!res.ok) continue;
     const fd = new FormData();
     fd.set("path", p);
-    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","label","catalog_number","bpm","art_url",...MB_FIELDS];
+    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort","media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS];
     for(const k of keys) fd.set(k, data[k] || "");
     if(genre) fd.set("genre", genre);
     if(album) fd.set("album", album);
@@ -3596,8 +3638,8 @@ async function loadTags(){{
   const data = await res.json();
   if(!res.ok){{ msg.textContent = data.error || "Error"; return; }}
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number","bpm",...MB_FIELDS]){{
+    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
+    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   // Autopopulate label/publisher (only if blank)
@@ -4158,8 +4200,8 @@ async function revertTags() {{
   const data = await res.json();
   if(!res.ok) return;
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "label","catalog_number","bpm","art_url",...MB_FIELDS]){{
+    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
+    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   // Autopopulate label/publisher (only if blank)
@@ -4280,8 +4322,8 @@ def update():
 
         fields = {k: request.form.get(k, "") for k in [
             "title","artist","album","albumartist","involved_people_list",
-            "date","genre","year","original_year","track","publisher","comment",
-            "artist_sort","albumartist_sort","art_url","label","catalog_number",
+            "date","genre","year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment",
+            "artist_sort","albumartist_sort","media_type","encoder_settings","unique_file_identifier","art_url","label","catalog_number",
             "bpm",
             *MB_TXXX_FIELDS,
         ]}
