@@ -3940,16 +3940,15 @@ function lastfm() {{
 
 let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
-let _lastListClick = {{ path: "", ts: 0, list: "" }};
+let _lastLoadRequest = {{ path: "", ts: 0 }};
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
-function handlePossibleDoubleClick(path, listName) {{
+function requestLoadFile(path) {{
   if(!path) return;
   const now = Date.now();
-  const sameItem = _lastListClick.path === path && _lastListClick.list === listName;
-  const fastRepeat = (now - _lastListClick.ts) <= 420;
-  _lastListClick = {{ path, ts: now, list: listName }};
-  if(sameItem && fastRepeat) loadFileByPath(path);
+  if(_lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) return;
+  _lastLoadRequest = {{ path, ts: now }};
+  loadFileByPath(path);
 }}
 
 document.getElementById("dirList").addEventListener("click", function(e){{
@@ -3960,8 +3959,10 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   if(!it) return;
   if(it.type === "dir") openDir(it.path);
   else {{
+    const wasSelected = item.classList.contains("selected");
     openFile(it.path);
-    handlePossibleDoubleClick(it.path, "dirList");
+    // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
+    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
   }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
@@ -3971,12 +3972,12 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
     const idx = parseInt(item.dataset.idx, 10);
     const it = _dirItems[idx];
     if(it && it.type !== "dir" && it.path){{
-      loadFileByPath(it.path);
+      requestLoadFile(it.path);
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) loadFileByPath(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath);
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
@@ -3985,8 +3986,10 @@ document.getElementById("sList").addEventListener("click", function(e){{
   if(!item) return;
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
+  const wasSelected = item.classList.contains("selected");
   openFile(it.path);
-  handlePossibleDoubleClick(it.path, "sList");
+  // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
+  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
@@ -3995,12 +3998,12 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
     const idx = parseInt(item.dataset.idx, 10);
     const it = _searchItems[idx];
     if(it && it.path){{
-      loadFileByPath(it.path);
+      requestLoadFile(it.path);
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) loadFileByPath(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath);
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
