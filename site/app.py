@@ -3842,11 +3842,17 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   else openFile(it.path);
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
+  if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _dirItems[parseInt(item.dataset.idx, 10)];
-  if(!it || it.type === "dir") return;
-  loadFileByPath(it.path);
+  if(item){{
+    const it = _dirItems[parseInt(item.dataset.idx, 10)];
+    if(it && it.type !== "dir"){{
+      loadFileByPath(it.path);
+      return;
+    }}
+  }}
+  const selectedPath = document.getElementById("path").value.trim();
+  if(selectedPath) loadFileByPath(selectedPath);
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
@@ -3858,11 +3864,17 @@ document.getElementById("sList").addEventListener("click", function(e){{
   openFile(it.path);
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
+  if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _searchItems[parseInt(item.dataset.idx, 10)];
-  if(!it) return;
-  loadFileByPath(it.path);
+  if(item){{
+    const it = _searchItems[parseInt(item.dataset.idx, 10)];
+    if(it){{
+      loadFileByPath(it.path);
+      return;
+    }}
+  }}
+  const selectedPath = document.getElementById("path").value.trim();
+  if(selectedPath) loadFileByPath(selectedPath);
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
