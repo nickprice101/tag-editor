@@ -3344,6 +3344,19 @@ async function loadFileByPath(p){{
   if(editH2) editH2.scrollIntoView({{behavior: "smooth", block: "start"}});
 }}
 
+function clearLookupResults() {{
+  window._webResults = [];
+  window._ac = [];
+  window._mb = [];
+  document.getElementById("mbResults").innerHTML = "";
+  document.getElementById("discogsResults").innerHTML = "";
+  document.getElementById("discogsTracklist").innerHTML = "";
+  document.getElementById("parseResults").innerHTML = "";
+  document.getElementById("acoustidResults").innerHTML = "";
+  document.getElementById("lastfmResults").innerHTML = "";
+  document.getElementById("genreSuggestions").innerHTML = "";
+}
+
 function upDir(){{
   const d = document.getElementById("dir").value.trim();
   const parts = d.split("/").filter(Boolean);
@@ -3379,6 +3392,7 @@ async function loadTags(){{
   const p = document.getElementById("path").value.trim();
   const msg = document.getElementById("loadMsg");
   if(!p){{ msg.textContent = "No file selected. Double-click a file in Browse or Search to load."; return; }}
+  clearLookupResults();
   msg.textContent = "Loading\u2026";
   const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
   const data = await res.json();
@@ -3402,7 +3416,6 @@ async function loadTags(){{
   if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
   setBaseline(null);
-  document.getElementById("genreSuggestions").innerHTML = "";
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
@@ -3933,11 +3946,7 @@ async function revertTags() {{
   const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
   if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   setBaseline(null);
-  document.getElementById("mbResults").innerHTML = "";
-  document.getElementById("discogsResults").innerHTML = "";
-  document.getElementById("discogsTracklist").innerHTML = "";
-  document.getElementById("parseResults").innerHTML = "";
-  document.getElementById("genreSuggestions").innerHTML = "";
+  clearLookupResults();
 }}
 
 async function checkArtUrlDim() {{
