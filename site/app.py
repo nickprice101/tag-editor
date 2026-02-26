@@ -2885,10 +2885,7 @@ def ui_home():
           <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
           <div class="field-group">
             <label>Genre</label>
-            <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
-              <input name="genre" style="flex:1;margin-bottom:0"/>
-              <button type="button" class="btn btn-sm btn-outline" onclick="suggestGenre()" title="Suggest genre from MusicBrainz tags">&#127908; Suggest</button>
-            </div>
+            <input name="genre"/>
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
@@ -2896,8 +2893,8 @@ def ui_home():
             <label>BPM</label><input name="bpm" placeholder="(optional)"/>
             <div class="hint">Stored as <span class="mono">TBPM</span> (decimals truncated to integer; non-numeric ignored)</div>
           </div>
-          <div class="field-group"><label>Publisher</label><input name="publisher"/></div>
-          <div class="field-group"><label>Comment</label><textarea name="comment" rows="3"></textarea></div>
+          <div class="field-group"><label>Publisher</label><input name="publisher" placeholder="(optional)"/></div>
+          <div class="field-group"><label>Comment</label><textarea name="comment" rows="3" placeholder="(optional)"></textarea></div>
         </div>
       </div>
       <div class="row2">
@@ -3095,9 +3092,8 @@ function applyIsName(fieldName, sortFieldName, cb) {{
   if(!cb.checked) return;
   const el = document.querySelector(`[name="${{fieldName}}"]`);
   if(!el || !el.value.trim()) {{ cb.checked = false; return; }}
-  setField(fieldName, isNameTransform(el.value));
-  // Also update the sort field if it is currently blank
-  if(!getField(sortFieldName)) setField(sortFieldName, sortName(getField(fieldName)));
+  // Populate the sort field from the source; leave the source field unchanged
+  setField(sortFieldName, isNameTransform(el.value));
 }}
 
 function renderFileItem(it, idx){{
@@ -3323,6 +3319,23 @@ function runMbSearch(){{
     }}
   );
 }}
+async function _autoFillGenreFromMB() {{
+  if(getField("genre")) return;
+  const recId = getField("musicbrainz_trackid");
+  const relId = getField("musicbrainz_albumid");
+  if(!recId && !relId) return;
+  const params = new URLSearchParams();
+  if(recId) params.set("recording_id", recId);
+  if(relId) params.set("release_id", relId);
+  try {{
+    const res = await fetch(`/api/suggest_genre?${{params}}`);
+    const data = await res.json();
+    if(data.matches && data.matches[0] && data.matches[0].folder) {{
+      setField("genre", data.matches[0].folder);
+    }}
+  }} catch(e) {{}}
+}}
+
 async function applyMBFromDialog(i){{
   const r = window._mb[i]; if(!r || !r.id) return;
   document.getElementById("mbDlgStatus").textContent = "Fetching full MB data\u2026";
@@ -3330,6 +3343,7 @@ async function applyMBFromDialog(i){{
   const data = await res.json();
   if(!data.fields){{ document.getElementById("mbDlgStatus").textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k,v);
+  await _autoFillGenreFromMB();
   document.getElementById("mbDlgStatus").textContent = "\u2713 Applied all MB/Picard fields.";
   document.getElementById("mbResults").innerHTML = `<div class="result-item"><strong>${{esc(r.title||"")}}</strong> \u2014 ${{esc(r.artist||"")}} <span class="hint">\u2713 Applied from MusicBrainz</span></div>`;
   closeMbDialog();
@@ -3525,6 +3539,7 @@ async function useAcoustID(i){{
   const data = await res.json();
   if(!data.fields){{ if(st) st.textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
+  await _autoFillGenreFromMB();
   if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
 }}
 
@@ -3605,7 +3620,11 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
         const p2 = document.getElementById("path").value.trim();
         const artImg2 = document.getElementById("artImg");
         const artPrev2 = document.getElementById("artPreview");
+        const artDims2 = document.getElementById("artDims");
         if(artImg2 && p2){{
+          artImg2.onload = function() {{
+            if(artDims2 && artImg2.naturalWidth && artImg2.naturalHeight) artDims2.textContent = artImg2.naturalWidth + "\u00d7" + artImg2.naturalHeight;
+          }};
           artImg2.src = `/api/art?path=${{encodeURIComponent(p2)}}&full=1&t=${{Date.now()}}`;
           if(artPrev2) artPrev2.style.display = "block";
         }}
