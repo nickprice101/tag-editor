@@ -4042,9 +4042,8 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   else {{
     const wasSelected = item.classList.contains("selected");
     openFile(it.path);
-    // Load on repeated single-clicks of an already-selected file.
-    // True double-click loads are handled in the separate dblclick listener.
-    if(e.detail === 1 && wasSelected) requestLoadFile(it.path, {{ reason: "click-on-selected" }});
+    // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
+    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
   }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
@@ -4072,9 +4071,8 @@ document.getElementById("sList").addEventListener("click", function(e){{
   logClickDebug("sList", "click", {{ detail: e.detail, path: it.path }});
   const wasSelected = item.classList.contains("selected");
   openFile(it.path);
-  // Load on repeated single-clicks of an already-selected file.
-  // True double-click loads are handled in the separate dblclick listener.
-  if(e.detail === 1 && wasSelected) requestLoadFile(it.path, {{ reason: "click-on-selected" }});
+  // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
+  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
