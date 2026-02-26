@@ -2380,6 +2380,10 @@ def api_discogs_search_stream():
             data = r.json()
             results = []
             for it in data.get("results", []):
+                title_txt = it.get("title", "")
+                album_score = _similarity(norm_q, title_txt)
+                artist_score = _similarity(norm_artist, title_txt) if norm_artist else 0.0
+                combined_score = int(round(((album_score * 0.8) + (artist_score * 0.2)) * 100))
                 results.append({
                     "title": it.get("title", ""),
                     "year": it.get("year", ""),
@@ -2389,6 +2393,7 @@ def api_discogs_search_stream():
                     "catno": it.get("catno", ""),
                     "label": (it.get("label", [""])[0] if isinstance(it.get("label"), list) else ""),
                     "uri": it.get("uri", ""),
+                    "score": combined_score,
                 })
             yield sse_event("log", f"Found {len(results)} result(s).")
             yield sse_event("result", json.dumps({"results": results}))
@@ -2689,6 +2694,10 @@ def ui_home():
     .row2 {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }}
     .row2 > * {{ min-width: 0; }}
     @media(max-width:700px){{ .row2 {{ grid-template-columns: 1fr; }} }}
+    .workspace {{ display:grid; grid-template-columns: minmax(320px, 430px) minmax(0, 1fr); gap:16px; align-items:start; }}
+    @media(max-width:1100px){{ .workspace {{ grid-template-columns: 1fr; }} }}
+    .left-pane {{ position: sticky; top: 14px; align-self: start; }}
+    @media(max-width:1100px){{ .left-pane {{ position: static; }} }}
     label {{ display: block; font-size: .85rem; font-weight: 600; margin-bottom: 4px; }}
     input[type=text], input:not([type]), textarea {{
       width: 100%; padding: 8px 10px;
@@ -2743,6 +2752,7 @@ def ui_home():
       display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
       cursor: pointer; border-bottom: 1px solid #f0f0f0; transition: background .1s;
     }}
+    .file-item-select {{ margin-top: 3px; }}
     .file-item:last-child {{ border-bottom: none; }}
     .file-item:hover {{ background: #f0f4ff; }}
     .file-item.selected {{ background: #dbeafe; }}
@@ -2773,6 +2783,21 @@ def ui_home():
     }}
     details.mb-section[open] summary {{ margin-bottom: 12px; list-style: disclosure-open; }}
     .result-item {{ border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }}
+    .match-badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin-left:7px; }}
+    .match-high {{ background:#d1fae5; color:#065f46; }}
+    .match-medium {{ background:#fef3c7; color:#92400e; }}
+    .match-low {{ background:#fee2e2; color:#991b1b; }}
+    .bulk-tools {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }}
+    .bulk-tools input {{ width:auto; min-width:90px; margin-bottom:0; }}
+    .bulk-count {{ font-size:.78rem; color:var(--muted); }}
+    .sticky-actions {{ position: sticky; bottom: 10px; z-index: 5; background: rgba(255,255,255,.96); border:1px solid var(--border); border-radius:10px; padding:10px; margin-top:10px; box-shadow: var(--shadow); }}
+    .field-error {{ color:#991b1b; font-size:.76rem; margin:-8px 0 8px; display:none; }}
+    .invalid {{ border-color:#991b1b !important; background:#fff1f2; }}
+    #toastStack {{ position:fixed; right:14px; bottom:14px; display:flex; flex-direction:column; gap:8px; z-index:2000; }}
+    .toast {{ color:#fff; padding:10px 12px; border-radius:8px; font-size:.84rem; box-shadow:0 6px 18px rgba(0,0,0,.2); max-width:340px; }}
+    .toast.success {{ background:#065f46; }}
+    .toast.error {{ background:#991b1b; }}
+    .toast.info {{ background:#1f2937; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     .section-sep {{ border: none; border-top: 1px solid var(--border); margin: 16px 0; }}
@@ -2803,7 +2828,8 @@ def ui_home():
 <h1>&#127925; MP3 Tag Editor</h1>
 <p class="sub">Music root: <span class="mono">{MUSIC_ROOT}</span></p>
 
-<div class="row2">
+<div class="workspace">
+  <div class="left-pane">
   <div class="card">
     <h2>Browse</h2>
     <p class="sub">Navigate folders. <strong>Double-click</strong> a file to load it for editing.</p>
@@ -2813,6 +2839,10 @@ def ui_home():
     <input id="dirFilter" placeholder="e.g. maribou or 2024"/>
     <button class="btn" type="button" onclick="loadDir()">Load</button>
     <button class="btn btn-ghost" type="button" onclick="upDir()">&#8593; Up</button>
+    <div class="bulk-tools">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('dirList', true)">Select all</button>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('dirList', false)">Clear</button>
+    </div>
     <div id="dirErr" class="hint"></div>
     <div class="file-list" id="dirList"></div>
   </div>
@@ -2825,10 +2855,13 @@ def ui_home():
     <label>Query</label>
     <input id="sq" placeholder="filename or partial path"/>
     <button class="btn" type="button" onclick="doSearch()">Search</button>
+    <div class="bulk-tools">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('sList', true)">Select all</button>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('sList', false)">Clear</button>
+    </div>
     <div id="sErr" class="hint"></div>
     <div class="file-list" id="sList"></div>
   </div>
-</div>
 
 <div class="card" id="playerCard">
   <h2>Player</h2>
@@ -2836,6 +2869,19 @@ def ui_home():
   <audio id="audioPlayer" controls style="width:100%;display:none"></audio>
 </div>
 
+<div class="card">
+  <h3>Bulk apply to selected files</h3>
+  <div class="bulk-count" id="bulkCount">0 selected</div>
+  <div class="bulk-tools">
+    <input id="bulkGenre" placeholder="Genre"/>
+    <input id="bulkYear" placeholder="Year"/>
+    <input id="bulkLabel" placeholder="Label"/>
+    <button type="button" class="btn btn-sm" onclick="applyBulkEdits()">Apply</button>
+  </div>
+</div>
+  </div>
+
+<div class="right-pane">
 <div class="card">
   <h2>Edit Tags</h2>
   <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">{MUSIC_ROOT}/Genre/AlbumArtist/Album [Year]/</span>.</p>
@@ -3002,9 +3048,14 @@ def ui_home():
       </div>
     </details>
 
-    <button class="btn" type="submit" name="action" value="write">&#128190; Write tags</button>
-    <button class="btn btn-ghost" type="submit" name="action" value="archive">&#128230; Write tags + Archive</button>
+    <div class="sticky-actions">
+      <button type="button" class="btn btn-ghost" onclick="revertTags()" title="Reload tags from disk">&#8629; Discard unsaved edits</button>
+      <button class="btn" type="submit" name="action" value="write">&#128190; Write tags</button>
+      <button class="btn btn-ghost" type="submit" name="action" value="archive">&#128230; Write tags + Archive</button>
+    </div>
   </form>
+</div>
+</div>
 </div>
 
 <div id="resultModal">
@@ -3031,6 +3082,8 @@ def ui_home():
     <div id="mbDlgResults"></div>
   </div>
 </div>
+
+<div id="toastStack" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 let _baseline = {{}};
@@ -3087,6 +3140,89 @@ function setBaseline(data) {{
   updateAllRevertUI();
 }}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
+function showToast(message, kind="info", ms=2800) {{
+  const stack = document.getElementById("toastStack");
+  if(!stack) return;
+  const el = document.createElement("div");
+  el.className = `toast ${{kind}}`;
+  el.textContent = message;
+  stack.appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}}
+function confidenceBadge(score) {{
+  const v = Number(score || 0);
+  if(v >= 85) return '<span class="match-badge match-high">High · ' + Math.round(v) + '</span>';
+  if(v >= 65) return '<span class="match-badge match-medium">Medium · ' + Math.round(v) + '</span>';
+  return '<span class="match-badge match-low">Low · ' + Math.round(v) + '</span>';
+}}
+function getSelectedPaths() {{
+  return Array.from(document.querySelectorAll('.file-item-select:checked')).map(el => el.dataset.path || "").filter(Boolean);
+}}
+function updateBulkCount() {{
+  const el = document.getElementById("bulkCount");
+  if(el) el.textContent = `${{getSelectedPaths().length}} selected`;
+}}
+function toggleVisibleListSelections(listId, selected) {{
+  const root = document.getElementById(listId);
+  if(!root) return;
+  root.querySelectorAll('.file-item-select').forEach(cb => cb.checked = selected);
+  updateBulkCount();
+}}
+async function applyBulkEdits() {{
+  const paths = getSelectedPaths();
+  if(!paths.length) {{ showToast("Select at least one file first.", "error"); return; }}
+  const genre = document.getElementById("bulkGenre").value.trim();
+  const year = document.getElementById("bulkYear").value.trim();
+  const label = document.getElementById("bulkLabel").value.trim();
+  if(!genre && !year && !label) {{ showToast("Enter at least one bulk field.", "error"); return; }}
+  let done = 0;
+  for(const p of paths) {{
+    const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
+    const data = await res.json();
+    if(!res.ok) continue;
+    const fd = new FormData();
+    fd.set("path", p);
+    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","label","catalog_number","bpm","art_url",...MB_FIELDS];
+    for(const k of keys) fd.set(k, data[k] || "");
+    if(genre) fd.set("genre", genre);
+    if(year) fd.set("year", year);
+    if(label) fd.set("label", label);
+    fd.set("action", "write");
+    const ures = await fetch("/update", {{method:"POST", body:fd}});
+    if(ures.ok) done += 1;
+  }}
+  showToast(`Bulk update complete: ${{done}}/${{paths.length}} files`, done ? "success" : "error", 3600);
+  await loadDir();
+  await doSearch();
+}}
+function setInlineFieldError(name, msg="") {{
+  const el = document.querySelector(`[name="${{name}}"]`);
+  if(!el) return;
+  let err = el.parentElement.querySelector('.field-error');
+  if(!err) {{
+    err = document.createElement('div');
+    err.className = 'field-error';
+    el.insertAdjacentElement('afterend', err);
+  }}
+  if(msg) {{
+    el.classList.add('invalid');
+    err.textContent = msg;
+    err.style.display = 'block';
+  }} else {{
+    el.classList.remove('invalid');
+    err.textContent = '';
+    err.style.display = 'none';
+  }}
+}}
+function validateBeforeSave() {{
+  let ok = true;
+  const required = [["title","Title is required"],["artist","Artist is required"],["album","Album is required"],["genre","Genre is required"],["year","Year is required"]];
+  for(const [k,msg] of required) {{
+    const v = getField(k).trim();
+    if(!v) {{ setInlineFieldError(k, msg); ok = false; }} else setInlineFieldError(k, "");
+  }}
+  return ok;
+}}
 function setField(name, val){{
   const el = document.querySelector(`[name="${{name}}"]`);
   if(!el) return;
@@ -3141,6 +3277,7 @@ function renderFileItem(it, idx){{
     ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>&#127925;</div>'">`
     : `<div class="file-thumb-placeholder">&#127925;</div>`;
   return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}" data-path="${{esc(it.path)}}">
+    <input type="checkbox" class="file-item-select" data-path="${{esc(it.path)}}" title="Select for bulk apply" onclick="event.stopPropagation()"/>
     ${{thumb}}
     <div class="file-meta">
       <div class="file-name">${{esc(it.name)}}</div>
@@ -3165,6 +3302,7 @@ async function loadDir(){{
   document.getElementById("dir").value = data.dir;
   _dirItems = data.items;
   box.innerHTML = data.items.map((it,i) => renderFileItem(it,i)).join("");
+  updateBulkCount();
 }}
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
@@ -3191,6 +3329,7 @@ async function loadFileByPath(p){{
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
   await loadTags();
+  showToast(`Loaded ${{fn}}`, "info", 1400);
   // Load audio player
   const audio = document.getElementById("audioPlayer");
   const playerFn = document.getElementById("playerFileName");
@@ -3226,6 +3365,7 @@ async function doSearch(){{
   err.textContent = `Found: ${{data.results.length}}`;
   _searchItems = data.results;
   box.innerHTML = data.results.map((it,i) => renderFileItem(it,i)).join("");
+  updateBulkCount();
 }}
 
 const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_releasegroupid",
@@ -3431,7 +3571,7 @@ function discogsSearch() {{
       window._dc = data.results;
       el.innerHTML = data.results.map((r,i) => `
         <div class="result-item">
-          <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>
+          <strong>${{esc(r.title)}}</strong> <span style="color:var(--muted)">${{esc(r.year||"")}}</span>${{confidenceBadge(r.score)}}
           <div class="hint">Label: ${{esc(r.label||"")}} | Cat#: ${{esc(r.catno||"")}}</div>
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
@@ -3515,7 +3655,7 @@ function webSearch(){{
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
               ${{r.source==='Beatport' && r.thumb ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\\''+esc(r.thumb)+'\\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
-              <span style="color:var(--muted);font-size:.78rem">score: ${{esc(String(r.score||0))}}</span>
+              ${{confidenceBadge(r.score)}}
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
           </div>`;
@@ -3592,6 +3732,7 @@ let _wsqAutoValue = "";
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
 document.getElementById("dirList").addEventListener("click", function(e){{
+  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
   const item = e.target.closest("[data-idx]");
   if(!item) return;
   const it = _dirItems[parseInt(item.dataset.idx, 10)];
@@ -3608,6 +3749,7 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
+  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
   const item = e.target.closest("[data-idx]");
   if(!item) return;
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
@@ -3624,6 +3766,10 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
   e.preventDefault();
+  if(!validateBeforeSave()) {{
+    showToast("Please fill the required fields before saving.", "error");
+    return;
+  }}
   const fd = new FormData(e.target);
   if(e.submitter && e.submitter.name) fd.set(e.submitter.name, e.submitter.value);
   try {{
@@ -3641,6 +3787,7 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
       if(data.label) html += `<div><strong>Label:</strong> ${{esc(data.label)}}</div>`;
       if(data.catalog_number) html += `<div><strong>Catalog #:</strong> ${{esc(data.catalog_number)}}</div>`;
       showModal(html);
+      showToast("Tags saved successfully.", "success");
       // Reset dirty-field baseline to current saved state
       const savedSnap = {{}};
       for(const k of Object.keys(_baseline)) savedSnap[k] = getField(k);
@@ -3662,9 +3809,11 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
       }}
     }} else {{
       showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x274C; Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
+      showToast(data.error || "Save failed", "error");
     }}
   }} catch(err) {{
     showModal(`<div style="color:#991b1b">&#x274C; Network error: ${{esc(err.message)}}</div>`);
+    showToast("Network error while saving.", "error");
   }}
 }});
 
@@ -3813,6 +3962,7 @@ document.getElementById("tagForm").addEventListener("input", function(e) {{
   if(!name || !(name in _baseline)) return;
   if(e.target.value !== (_baseline[name] || "")) e.target.classList.add("dirty");
   else e.target.classList.remove("dirty");
+  setInlineFieldError(name, "");
   updateRevertUI(name);
 }});
 
