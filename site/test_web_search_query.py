@@ -38,7 +38,7 @@ requests_mod.get = lambda *a, **kw: None
 id3_mod = types.ModuleType("mutagen.id3")
 for sym in ("ID3", "ID3NoHeaderError", "TIT2", "TPE1", "TALB", "TPE2", "TCON",
             "TRCK", "TPUB", "COMM", "TDRC", "TYER", "TXXX", "TSOP", "TSO2",
-            "APIC", "TBPM"):
+            "APIC", "TBPM", "TMED", "TPOS", "TCMP", "TDOR", "TORY", "UFID", "TIPL", "TSSE"):
     setattr(id3_mod, sym, None)
 sys.modules["mutagen.id3"] = id3_mod
 
