@@ -2686,18 +2686,19 @@ def ui_home():
       max-width: 1300px;
       line-height: 1.4;
     }}
-    h1 {{ font-size: 1.6rem; font-weight: 750; margin: 0 0 6px; letter-spacing: -.02em; }}
+    h1 {{ font-size: 1.28rem; font-weight: 750; margin: 0 0 3px; letter-spacing: -.02em; }}
     h2 {{ font-size: 1.05rem; font-weight: 700; margin: 0 0 10px; color: var(--accent-strong); letter-spacing: -.01em; }}
     h3 {{ font-size: .95rem; font-weight: 600; margin: 0 0 8px; }}
     p.sub {{ color: var(--muted); font-size: .85rem; margin: 0 0 16px; }}
     .topbar {{
-      margin-bottom: 18px;
-      padding: 16px 18px;
+      margin-bottom: 12px;
+      padding: 10px 12px;
       background: linear-gradient(135deg, #ffffff 0%, #fff5f8 100%);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow-soft);
     }}
+    .topbar .sub {{ margin-bottom: 0; font-size: .76rem; }}
     .card {{
       background: linear-gradient(180deg, var(--card-bg) 0%, var(--card-alt) 100%);
       border: 1px solid var(--border);
@@ -2845,6 +2846,9 @@ def ui_home():
     .match-low {{ background:#fee2e2; color:#991b1b; }}
     .bulk-tools {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }}
     .bulk-tools input {{ width:auto; min-width:90px; margin-bottom:0; }}
+    .input-inline {{ display:flex; gap:8px; align-items:center; }}
+    .input-inline input {{ margin-bottom:0; }}
+    .input-inline .btn {{ margin-right:0; margin-bottom:0; white-space:nowrap; }}
     .bulk-count {{ font-size:.78rem; color:var(--muted); }}
     .sticky-actions {{ position: sticky; bottom: 10px; z-index: 5; background: rgba(255,255,255,.96); border:1px solid var(--border); border-radius:var(--radius); padding:10px; margin-top:10px; box-shadow: var(--shadow); }}
     .field-error {{ color:#991b1b; font-size:.76rem; margin:-8px 0 8px; display:none; }}
@@ -2877,6 +2881,9 @@ def ui_home():
     .stream-status .log-line {{ color: var(--muted); }}
     .stream-status .s-ok {{ color: #065f46; font-weight: 600; }}
     .stream-status .s-err {{ color: #991b1b; font-weight: 600; }}
+    .picker-list {{ max-height: 300px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; margin-top: 8px; }}
+    .picker-item {{ padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: .86rem; }}
+    .picker-item:hover {{ background: #fff0f5; }}
   </style>
 </head>
 <body>
@@ -2892,7 +2899,10 @@ def ui_home():
     <h2>Browse</h2>
     <p class="sub">Navigate folders. <strong>Double-click</strong> a file to load it for editing.</p>
     <label>Directory</label>
-    <input id="dir" value="{browse_default}"/>
+    <div class="input-inline">
+      <input id="dir" value="{browse_default}"/>
+      <button class="btn btn-ghost" type="button" onclick="openDirectoryPicker()">Browse…</button>
+    </div>
     <label>Filter (optional)</label>
     <input id="dirFilter" placeholder="e.g. maribou or 2024"/>
     <button class="btn" type="button" onclick="loadDir()">Load</button>
@@ -2932,6 +2942,7 @@ def ui_home():
   <div class="bulk-count" id="bulkCount">0 selected</div>
   <div class="bulk-tools">
     <input id="bulkGenre" placeholder="Genre"/>
+    <input id="bulkAlbum" placeholder="Album"/>
     <input id="bulkYear" placeholder="Year"/>
     <input id="bulkLabel" placeholder="Label"/>
     <button type="button" class="btn btn-sm" onclick="applyBulkEdits()">Apply</button>
@@ -3132,6 +3143,20 @@ def ui_home():
   </div>
 </div>
 
+<div id="dirPickerModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1001;align-items:center;justify-content:center">
+  <div class="modal-inner" style="max-height:90vh;overflow-y:auto">
+    <h3 style="margin-top:0">Choose directory</h3>
+    <div id="dirPickerPath" class="hint mono" style="margin-bottom:4px"></div>
+    <div class="bulk-tools" style="margin-top:0">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="dirPickerUp()">Up</button>
+      <button type="button" class="btn btn-sm" onclick="confirmDirectoryPicker()">Use this directory</button>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="closeDirectoryPicker()">Cancel</button>
+    </div>
+    <div id="dirPickerErr" class="hint"></div>
+    <div id="dirPickerList" class="picker-list"></div>
+  </div>
+</div>
+
 <div id="mbDialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1001;align-items:center;justify-content:center">
   <div style="background:var(--card-bg);border-radius:var(--radius);padding:24px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.3);max-height:90vh;overflow-y:auto">
     <h3 style="margin:0 0 14px">MusicBrainz Search</h3>
@@ -3239,9 +3264,10 @@ async function applyBulkEdits() {{
   const paths = getSelectedPaths();
   if(!paths.length) {{ showToast("Select at least one file first.", "error"); return; }}
   const genre = document.getElementById("bulkGenre").value.trim();
+  const album = document.getElementById("bulkAlbum").value.trim();
   const year = document.getElementById("bulkYear").value.trim();
   const label = document.getElementById("bulkLabel").value.trim();
-  if(!genre && !year && !label) {{ showToast("Enter at least one bulk field.", "error"); return; }}
+  if(!genre && !album && !year && !label) {{ showToast("Enter at least one bulk field.", "error"); return; }}
   let done = 0;
   for(const p of paths) {{
     const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
@@ -3252,6 +3278,7 @@ async function applyBulkEdits() {{
     const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","label","catalog_number","bpm","art_url",...MB_FIELDS];
     for(const k of keys) fd.set(k, data[k] || "");
     if(genre) fd.set("genre", genre);
+    if(album) fd.set("album", album);
     if(year) fd.set("year", year);
     if(label) fd.set("label", label);
     fd.set("action", "write");
@@ -3364,7 +3391,7 @@ function renderFileItem(it, idx){{
   const thumb = it.has_art
     ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>ART</div>'">`
     : `<div class="file-thumb-placeholder">ART</div>`;
-  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}" data-path="${{esc(it.path)}}">
+  return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}" data-type="${{esc(it.type || 'file')}}" data-path="${{esc(it.path)}}">
     <input type="checkbox" class="file-item-select" data-path="${{esc(it.path)}}" title="Select for bulk apply" onclick="event.stopPropagation()"/>
     ${{thumb}}
     <div class="file-meta">
@@ -3394,6 +3421,48 @@ async function loadDir(){{
 }}
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
+let _dirPickerPath = "";
+function closeDirectoryPicker() {{
+  const m = document.getElementById("dirPickerModal");
+  if(m) m.style.display = "none";
+}}
+async function openDirectoryPicker() {{
+  _dirPickerPath = document.getElementById("dir").value.trim() || "{MUSIC_ROOT}";
+  const m = document.getElementById("dirPickerModal");
+  if(m) m.style.display = "flex";
+  await loadDirectoryPicker(_dirPickerPath);
+}}
+async function loadDirectoryPicker(dirPath) {{
+  const err = document.getElementById("dirPickerErr");
+  const list = document.getElementById("dirPickerList");
+  const pathEl = document.getElementById("dirPickerPath");
+  if(err) err.textContent = "Loading…";
+  const res = await fetch(`/api/list?dir=${{encodeURIComponent(dirPath)}}`);
+  const data = await res.json();
+  if(!res.ok) {{ if(err) err.textContent = data.error || "Unable to load directory."; return; }}
+  _dirPickerPath = data.dir;
+  if(pathEl) pathEl.textContent = data.dir;
+  if(err) err.textContent = "";
+  const dirs = (data.items || []).filter(it => it.type === "dir");
+  if(!list) return;
+  list.innerHTML = dirs.length
+    ? dirs.map(d => `<div class="picker-item" data-path="${{esc(d.path)}}">📁 ${{esc(d.name)}}</div>`).join("")
+    : '<div class="picker-item" style="cursor:default;color:var(--muted)">No subdirectories</div>';
+  list.querySelectorAll('.picker-item[data-path]').forEach(el => el.addEventListener('click', () => loadDirectoryPicker(el.dataset.path)));
+}}
+function dirPickerUp() {{
+  const parts = (_dirPickerPath || "").split("/").filter(Boolean);
+  if(parts.length <= 1) return;
+  parts.pop();
+  loadDirectoryPicker("/" + parts.join("/"));
+}}
+function confirmDirectoryPicker() {{
+  if(!_dirPickerPath) return;
+  document.getElementById("dir").value = _dirPickerPath;
+  closeDirectoryPicker();
+  loadDir();
+}}
+
 function openFile(p){{
   document.getElementById("path").value = p;
   const fn = p.split("/").pop();
@@ -3845,9 +3914,10 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const it = _dirItems[parseInt(item.dataset.idx, 10)];
-    if(it && it.type !== "dir"){{
-      loadFileByPath(it.path);
+    const type = item.dataset.type;
+    const path = item.dataset.path;
+    if(type && type !== "dir" && path){{
+      loadFileByPath(path);
       return;
     }}
   }}
@@ -3867,9 +3937,9 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const it = _searchItems[parseInt(item.dataset.idx, 10)];
-    if(it){{
-      loadFileByPath(it.path);
+    const path = item.dataset.path;
+    if(path){{
+      loadFileByPath(path);
       return;
     }}
   }}
