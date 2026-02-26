@@ -891,6 +891,29 @@ def mb_headers():
 _mb_last_req_time: float = 0.0
 _mb_throttle_lock = threading.Lock()
 _MB_THROTTLE_SECS = 1.0
+_cover_art_exists_cache: dict = {}
+
+
+def _cover_art_urls_if_exists(release_id: str) -> tuple:
+    """Return (thumb, full) cover art URLs only when a front image exists."""
+    rid = (release_id or "").strip()
+    if not rid:
+        return "", ""
+    cached = _cover_art_exists_cache.get(rid)
+    if cached is not None:
+        return cached
+
+    thumb_url = f"https://coverartarchive.org/release/{rid}/front-250"
+    full_url = f"https://coverartarchive.org/release/{rid}/front"
+    try:
+        r = requests.head(thumb_url, headers=mb_headers(), timeout=10, allow_redirects=True)
+        ok = r.status_code < 400 and "image" in (r.headers.get("content-type") or "").lower()
+    except Exception:
+        ok = False
+
+    result = (thumb_url, full_url) if ok else ("", "")
+    _cover_art_exists_cache[rid] = result
+    return result
 
 def mb_get(url: str, **kwargs) -> requests.Response:
     """MusicBrainz HTTP GET: ~1s throttle (best-effort) + retry on errors/429/5xx."""
@@ -1037,7 +1060,6 @@ def api_mb_search():
     title = (request.args.get("title") or "").strip()
     artist = (request.args.get("artist") or "").strip()
     album = (request.args.get("album") or "").strip()
-    label = (request.args.get("label") or "").strip()
     year = (request.args.get("year") or "").strip()
     if not title and not artist:
         return jsonify({"error": "Provide at least a title or artist."}), 400
@@ -1050,8 +1072,6 @@ def api_mb_search():
         parts.append(f'artist:"{norm_artist}"')
     if album:
         parts.append(f'release:"{album}"')
-    if label:
-        parts.append(f'label:"{label}"')
     if year and year.isdigit():
         parts.append(f'date:{year}')
     q = " AND ".join(parts)
@@ -1072,14 +1092,25 @@ def api_mb_search():
             album = rel.get("title", "") or ""
             rel_ac = rel.get("artist-credit", []) or []
             albumartist = rel_ac[0].get("name", "") if rel_ac else ""
+        rel_date = rec.get("first-release-date", "") or ""
+        score = _score_result(
+            norm_artist,
+            norm_title,
+            artist_name or "",
+            rec.get("title", "") or "",
+            year_q=year,
+            res_year=rel_date[:4] if len(rel_date) >= 4 and rel_date[:4].isdigit() else "",
+        )
         out.append({
             "id": rec.get("id", ""),
             "title": rec.get("title", ""),
             "artist": artist_name or "",
             "album": album,
             "albumartist": albumartist,
-            "date": rec.get("first-release-date", "") or "",
+            "date": rel_date,
+            "score": score,
         })
+    out.sort(key=lambda x: x.get("score", 0), reverse=True)
     return jsonify({"results": out})
 
 @app.route("/api/mb_search_stream", methods=["GET"])
@@ -1090,7 +1121,6 @@ def api_mb_search_stream():
     title = (request.args.get("title") or "").strip()
     artist = (request.args.get("artist") or "").strip()
     album = (request.args.get("album") or "").strip()
-    label = (request.args.get("label") or "").strip()
     year = (request.args.get("year") or "").strip()
 
     def generate():
@@ -1105,8 +1135,6 @@ def api_mb_search_stream():
             parts.append(f'artist:"{norm_artist}"')
         if album:
             parts.append(f'release:"{album}"')
-        if label:
-            parts.append(f'label:"{label}"')
         if year and year.isdigit():
             parts.append(f'date:{year}')
         q = " AND ".join(parts)
@@ -1130,9 +1158,15 @@ def api_mb_search_stream():
                     rel_ac = rel.get("artist-credit", []) or []
                     albumartist = rel_ac[0].get("name", "") if rel_ac else ""
                     release_id = rel.get("id", "") or ""
-                thumb = (
-                    f"https://coverartarchive.org/release/{release_id}/front-250"
-                    if release_id else ""
+                thumb, cover_image = _cover_art_urls_if_exists(release_id)
+                rel_date = rec.get("first-release-date", "") or ""
+                score = _score_result(
+                    norm_artist,
+                    norm_title,
+                    artist_name or "",
+                    rec.get("title", "") or "",
+                    year_q=year,
+                    res_year=rel_date[:4] if len(rel_date) >= 4 and rel_date[:4].isdigit() else "",
                 )
                 out.append({
                     "id": rec.get("id", ""),
@@ -1140,10 +1174,13 @@ def api_mb_search_stream():
                     "artist": artist_name or "",
                     "album": rec_album,
                     "albumartist": albumartist,
-                    "date": rec.get("first-release-date", "") or "",
+                    "date": rel_date,
+                    "score": score,
                     "release_id": release_id,
                     "thumb": thumb,
+                    "cover_image": cover_image,
                 })
+            out.sort(key=lambda x: x.get("score", 0), reverse=True)
             yield sse_event("log", f"Found {len(out)} result(s).")
             yield sse_event("result", json.dumps({"results": out}))
         except Exception as e:
@@ -3242,7 +3279,6 @@ def ui_home():
     <label>Title</label><input id="mbDlgTitle" placeholder="Track title"/>
     <label>Artist</label><input id="mbDlgArtist" placeholder="Artist name"/>
     <label>Album / Release</label><input id="mbDlgAlbum" placeholder="Album or release (optional)"/>
-    <label>Label</label><input id="mbDlgLabel" placeholder="Record label (optional)"/>
     <label>Year</label><input id="mbDlgYear" placeholder="Year e.g. 2018 (optional)"/>
     <div style="display:flex;gap:8px;margin-bottom:10px">
       <button type="button" class="btn" onclick="runMbSearch()">Search</button>
@@ -3703,7 +3739,6 @@ function mbSearchDialog(){{
   document.getElementById("mbDlgTitle").value = title;
   document.getElementById("mbDlgArtist").value = artist;
   document.getElementById("mbDlgAlbum").value = getField("album");
-  document.getElementById("mbDlgLabel").value = getField("label");
   document.getElementById("mbDlgYear").value = getField("year");
   document.getElementById("mbDlgResults").innerHTML = "";
   document.getElementById("mbDlgStatus").textContent = "";
@@ -3721,7 +3756,6 @@ function runMbSearch(){{
   const title = document.getElementById("mbDlgTitle").value.trim();
   const artist = document.getElementById("mbDlgArtist").value.trim();
   const album = document.getElementById("mbDlgAlbum").value.trim();
-  const label = document.getElementById("mbDlgLabel").value.trim();
   const year = document.getElementById("mbDlgYear").value.trim();
   if(!title && !artist){{ document.getElementById("mbDlgStatus").textContent = "Enter at least a title or artist."; return; }}
   document.getElementById("mbDlgStatus").textContent = "";
@@ -3730,7 +3764,6 @@ function runMbSearch(){{
   if(title) params.set("title",title);
   if(artist) params.set("artist",artist);
   if(album) params.set("album",album);
-  if(label) params.set("label",label);
   if(year) params.set("year",year);
   startStream("mbSearch",
     `/api/mb_search_stream?${{params}}`,
@@ -3740,12 +3773,12 @@ function runMbSearch(){{
       document.getElementById("mbDlgStatus").textContent = `${{data.results.length}} result(s)`;
       window._mb = data.results;
       el.innerHTML = data.results.map((r,i)=>{{
-        const artUrl = r.release_id ? `https://coverartarchive.org/release/${{esc(r.release_id)}}/front` : "";
+        const artUrl = r.cover_image || "";
         const thumbUrl = r.thumb || "";
         return `<div class="result-item" style="margin-top:8px">
-          ${{thumbUrl ? `<img src="${{esc(thumbUrl)}}" style="max-height:50px;border-radius:6px;float:right;margin-left:8px;cursor:pointer" onclick="showImageModal('${{esc(artUrl||thumbUrl)}}')" title="Click to enlarge" onerror="this.style.display='none'">` : ""}}
-          <strong>${{esc(r.title)}}</strong> \u2014 ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>
-          ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` \u2014 ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
+          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\'none\'" loading="lazy" onclick="showImageModal(\''+esc(artUrl||thumbUrl)+'\')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+          <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>${{confidenceBadge(r.score)}}
+          ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
             ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(artUrl)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
@@ -4050,7 +4083,7 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
     openDir(it.path);
     return;
   }}
-  void requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
+  requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
@@ -4064,7 +4097,7 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
   const idx = parseInt(item.dataset.idx, 10);
   const it = _searchItems[idx];
   logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
-  if(it && it.path) void requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
+  if(it && it.path) requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
