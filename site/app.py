@@ -251,6 +251,13 @@ def _juno_thumb_to_full(url: str) -> str:
     return re.sub(r"/150/([A-Za-z0-9-]+)\.jpg$", r"/full/\1-BIG.jpg", url)
 
 
+def _bandcamp_thumb_to_full(url: str) -> str:
+    """Convert Bandcamp result thumbnails (_7/_8/etc) to large (_16) URLs."""
+    if not url:
+        return ""
+    return re.sub(r"_(?:\d+)\.jpg$", "_16.jpg", url)
+
+
 def _should_retry_without_remix(retry_meaningful: bool, retry_q_out: str, norm_q_out: str,
                                 first_pass_best_score: float, first_pass_hit_count: int) -> bool:
     """Decide whether the remix-stripped retry search should run.
@@ -1529,6 +1536,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     srcset = img_el.get("srcset", "")
                     if srcset:
                         thumb = srcset.split(",")[0].strip().split()[0]
+            thumb = _bandcamp_thumb_to_full(thumb)
 
             # Optional: extract release date from .released
             released = ""
@@ -1589,22 +1597,48 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 if thumb:
                     entry["thumb"] = thumb
                 results.append(entry)
-        # Secondary: listing items with explicit artist/title elements
-        if not results:
-            for item in soup.find_all("div", class_=re.compile(r"jd-listing-item|track_search_results")):
-                title_el = item.find(class_=re.compile(r"juno-title|title"))
-                artist_el = item.find(class_=re.compile(r"juno-artist|artist"))
-                link_el = item.find("a", href=True)
+        # Secondary: listing items with explicit artist/title elements and rich metadata.
+        # Run this regardless of primary matches so we can capture fields like
+        # label/genre/BPM/track_number when available.
+        for item in soup.find_all("div", class_=re.compile(r"jd-listing-item|track_search_results")):
+                title_link_el = item.find("a", class_=re.compile(r"juno-title"))
+                artist_wrap_el = item.find(class_=re.compile(r"juno-artist"))
+                artist_link_el = artist_wrap_el.find("a") if artist_wrap_el else None
+                link_el = title_link_el or item.find("a", href=True)
                 img_el = item.find("img", src=True)
-                t = title_el.get_text(strip=True) if title_el else ""
-                a = artist_el.get_text(strip=True) if artist_el else ""
+                t = title_link_el.get_text(strip=True) if title_link_el else ""
+                a = artist_link_el.get_text(strip=True) if artist_link_el else (artist_wrap_el.get_text(strip=True) if artist_wrap_el else "")
                 raw_href = link_el["href"] if link_el else ""
                 thumb = _juno_thumb_to_full(img_el["src"]) if img_el else ""
                 if raw_href and not raw_href.startswith("http"):
                     raw_href = "https://www.junodownload.com" + raw_href
+                label = ""
+                label_el = item.find("a", class_=re.compile(r"juno-label|label"))
+                if label_el:
+                    label = label_el.get_text(strip=True)
+                genre = ""
+                meta_el = item.find(class_=re.compile(r"lit-label-genre|genre"))
+                if meta_el:
+                    meta_text = meta_el.get_text(" ", strip=True)
+                    if label and meta_text.startswith(label):
+                        meta_text = meta_text[len(label):].strip(" -|/")
+                    genre_parts = [p.strip() for p in re.split(r"\s*\|\s*|\s*\n+\s*", meta_text) if p.strip()]
+                    if not label and genre_parts:
+                        maybe_label = genre_parts[0]
+                        if maybe_label and not re.search(r"/", maybe_label):
+                            label = maybe_label
+                    if genre_parts:
+                        maybe_genre = genre_parts[-1]
+                        if maybe_genre != label:
+                            genre = maybe_genre
+                bpm = None
+                bpm_el = item.find(class_=re.compile(r"lit-date-length-tempo|tempo"))
+                bpm_text = bpm_el.get_text(" ", strip=True) if bpm_el else ""
+                m_bpm = re.search(r"(\d{2,3})\s*BPM", bpm_text, re.IGNORECASE)
+                if m_bpm:
+                    bpm = m_bpm.group(1)
                 # Extract track_number from a.juno-title href query string
                 track_number = None
-                title_link_el = title_el.find("a", href=True) if title_el else None
                 if title_link_el:
                     tn_qs = parse_qs(urlparse(title_link_el["href"]).query)
                     if "track_number" in tn_qs:
@@ -1628,8 +1662,15 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         entry["thumb"] = thumb
                     if track_number is not None:
                         entry["track_number"] = track_number
+                    if label:
+                        entry["label"] = label
+                    if genre:
+                        entry["genre"] = genre
+                    if bpm is not None:
+                        entry["bpm"] = bpm
                     results.append(entry)
         # fallback: product heading
+        if not results:
             for item in soup.find_all("div", class_=re.compile(r"product|juno-track")):
                 link_el = item.find("a", href=re.compile(r"/products/"))
                 title_el = item.find("span", class_=re.compile(r"title"))
@@ -3816,7 +3857,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block'+(r.source==='Beatport'?';cursor:pointer':'')+'" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" '+(r.source==='Beatport'?'onclick="showImageModal(\\''+esc(r.thumb)+'\\')" ':'')+' onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal(\\''+esc(r.cover_image||r.thumb)+'\\')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'×\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
@@ -3824,7 +3865,7 @@ function webSearch(){{
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
-              ${{r.source==='Beatport' && r.thumb ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\\''+esc(r.thumb)+'\\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
+              ${{(r.cover_image||r.thumb) ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\\''+esc(r.cover_image||r.thumb)+'\\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
               ${{confidenceBadge(r.score)}}
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}

@@ -155,17 +155,17 @@ def test_fallback_to_heading_url_when_no_itemurl(results):
 
 def test_thumbnail_from_data_src(results):
     """Lazy-load data-src attribute is used when src is a placeholder."""
-    assert results[0]["thumb"] == "https://f4.bcbits.com/img/a0123456789_7.jpg"
+    assert results[0]["thumb"] == "https://f4.bcbits.com/img/a0123456789_16.jpg"
 
 
 def test_thumbnail_from_src(results):
     """Real src attribute is used directly."""
-    assert results[1]["thumb"] == "https://f4.bcbits.com/img/b9999999999_7.jpg"
+    assert results[1]["thumb"] == "https://f4.bcbits.com/img/b9999999999_16.jpg"
 
 
 def test_thumbnail_from_srcset(results):
     """First URL from srcset is used when src/data-src are absent."""
-    assert results[2]["thumb"] == "https://f4.bcbits.com/img/c111_7.jpg"
+    assert results[2]["thumb"] == "https://f4.bcbits.com/img/c111_16.jpg"
 
 
 def test_released_date_parsed_to_iso(results):

@@ -192,3 +192,29 @@ def test_juno_secondary_href_takes_precedence_over_onclick():
     )
     assert len(results) == 1
     assert results[0].get("track_number") == "2"
+
+JUNO_SECONDARY_HTML_METADATA = """
+<html><body>
+<div class="jd-listing-item-track" data-ua_location="track">
+  <div class="lit-img"><a href="/products/turn-up-tunes-vol-08/7421830-02/?track_number=4"><img class="img-fluid-fill img-rnd" src="https://imagescdn.junodownload.com/75/CS7421830-02A-TN.jpg"></a></div>
+  <div class="lit-artist-title jq_highlight"><div class="juno-artist"><a href="/artists/Selda/">Selda</a></div><a class="juno-title" href="/products/turn-up-tunes-vol-08/7421830-02/?track_number=4">Set It Off (E.M.C.K. extended remix)</a></div>
+  <div class="lit-label-genre jq_highlight d-none d-md-block"><a class="juno-label" href="/labels/Play+This%21/">Play This!</a><br>Funky/Club House</div>
+  <div class="lit-date-length-tempo text-right d-none d-sm-block">5:38 / 124 BPM</div>
+</div>
+</body></html>
+"""
+
+
+def test_juno_secondary_extracts_label_genre_bpm_and_track_number():
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        JUNO_SECONDARY_HTML_METADATA,
+        artist_q="Selda",
+        title_q="Set It Off",
+    )
+    assert len(results) == 1
+    assert results[0].get("track_number") == "4"
+    assert results[0].get("label") == "Play This!"
+    assert results[0].get("genre") == "Funky/Club House"
+    assert results[0].get("bpm") == "124"
