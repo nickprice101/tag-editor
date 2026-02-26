@@ -2488,6 +2488,81 @@ def api_suggest_genre():
     matches = _map_tags_to_folders(tags_sorted, folders)
     return jsonify({"mb_tags": tags_sorted, "matches": matches, "genres": folders})
 
+@app.route("/api/audio", methods=["GET"])
+def api_audio():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        path = safe_path(request.args.get("path", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get("Range", "")
+
+    if range_header:
+        # Parse Range header: bytes=START-END, bytes=START-, bytes=-SUFFIXLEN
+        m = re.match(r"bytes=(\d*)-(\d*)", range_header)
+        if not m:
+            return Response("Invalid Range", status=416,
+                            headers={"Content-Range": f"bytes */{file_size}"})
+        start_str, end_str = m.group(1), m.group(2)
+        if start_str == "" and end_str == "":
+            return Response("Invalid Range", status=416,
+                            headers={"Content-Range": f"bytes */{file_size}"})
+        if start_str == "":
+            # bytes=-SUFFIXLEN
+            suffix = int(end_str)
+            start = max(0, file_size - suffix)
+            end = file_size - 1
+        elif end_str == "":
+            # bytes=START-
+            start = int(start_str)
+            end = file_size - 1
+        else:
+            start = int(start_str)
+            end = min(int(end_str), file_size - 1)
+        if start > end or start >= file_size:
+            return Response("Range Not Satisfiable", status=416,
+                            headers={"Content-Range": f"bytes */{file_size}"})
+        length = end - start + 1
+
+        def generate_partial():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                chunk = 65536
+                while remaining > 0:
+                    data = f.read(min(chunk, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        }
+        return Response(generate_partial(), status=206, mimetype="audio/mpeg",
+                        headers=headers, direct_passthrough=True)
+
+    # Non-range: return full file
+    def generate_full():
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                yield data
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+    }
+    return Response(generate_full(), status=200, mimetype="audio/mpeg",
+                    headers=headers, direct_passthrough=True)
+
 @app.route("/", methods=["GET"])
 def ui_home():
     if not basic_auth_ok():
@@ -2680,6 +2755,12 @@ def ui_home():
     <div id="sErr" class="hint"></div>
     <div class="file-list" id="sList"></div>
   </div>
+</div>
+
+<div class="card" id="playerCard">
+  <h2>Player</h2>
+  <div id="playerFileName" style="font-size:.88rem;color:var(--muted);margin-bottom:10px">No file loaded.</div>
+  <audio id="audioPlayer" controls style="width:100%;display:none"></audio>
 </div>
 
 <div class="card">
@@ -3043,6 +3124,15 @@ async function loadFileByPath(p){{
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
   await loadTags();
+  // Load audio player
+  const audio = document.getElementById("audioPlayer");
+  const playerFn = document.getElementById("playerFileName");
+  if(audio){{
+    audio.src = `/api/audio?path=${{encodeURIComponent(p)}}`;
+    audio.style.display = "";
+    audio.load();
+  }}
+  if(playerFn) playerFn.textContent = fn;
   // Scroll to Edit Tags section
   const editH2 = Array.from(document.querySelectorAll("h2")).find(h => h.textContent.trim() === "Edit Tags");
   if(editH2) editH2.scrollIntoView({{behavior: "smooth", block: "start"}});
