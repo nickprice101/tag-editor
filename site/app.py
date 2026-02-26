@@ -3899,7 +3899,17 @@ function lastfm() {{
 
 let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
+let _lastListClick = {{ path: "", ts: 0, list: "" }};
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
+
+function handlePossibleDoubleClick(path, listName) {{
+  if(!path) return;
+  const now = Date.now();
+  const sameItem = _lastListClick.path === path && _lastListClick.list === listName;
+  const fastRepeat = (now - _lastListClick.ts) <= 420;
+  _lastListClick = {{ path, ts: now, list: listName }};
+  if(sameItem && fastRepeat) loadFileByPath(path);
+}}
 
 document.getElementById("dirList").addEventListener("click", function(e){{
   if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
@@ -3910,7 +3920,7 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   if(it.type === "dir") openDir(it.path);
   else {{
     openFile(it.path);
-    if(e.detail >= 2) loadFileByPath(it.path);
+    handlePossibleDoubleClick(it.path, "dirList");
   }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
@@ -3935,7 +3945,7 @@ document.getElementById("sList").addEventListener("click", function(e){{
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   openFile(it.path);
-  if(e.detail >= 2) loadFileByPath(it.path);
+  handlePossibleDoubleClick(it.path, "sList");
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
