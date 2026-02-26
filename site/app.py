@@ -968,6 +968,10 @@ def api_list():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route("/api/ping", methods=["GET"])
+def api_ping():
+    return jsonify({"ok": True})
+
 @app.route("/api/search", methods=["GET"])
 def api_search():
     if not basic_auth_ok():
@@ -3776,12 +3780,12 @@ function runMbSearch(){{
         const artUrl = r.cover_image || "";
         const thumbUrl = r.thumb || "";
         return `<div class="result-item" style="margin-top:8px">
-          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\'none\'" loading="lazy" onclick="showImageModal(\''+esc(artUrl||thumbUrl)+'\')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\'none\'" loading="lazy" onclick="showImageModal('+JSON.stringify(artUrl||thumbUrl)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>${{confidenceBadge(r.score)}}
           ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
-            ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(artUrl)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
+            ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(artUrl)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
           </div>
           <div class="hint mono">MBID: ${{esc(r.id)}}</div>
         </div>`;
@@ -3875,8 +3879,8 @@ function discogsSearch() {{
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
             ${{r.uri ? `<a href="${{esc(r.uri)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
-            ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard('${{esc(r.cover_image||r.thumb)}}',this)" title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
-            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal(\\''+esc(r.cover_image||r.thumb)+'\\')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
+            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           </div>
         </div>`).join("");
     }}
@@ -3945,7 +3949,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal(\\''+esc(r.cover_image||r.thumb)+'\\')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'×\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'×\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
@@ -3953,7 +3957,7 @@ function webSearch(){{
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
-              ${{(r.cover_image||r.thumb) ? '<button type="button" class="btn btn-sm btn-outline" onclick="copyToClipboard(\\''+esc(r.cover_image||r.thumb)+'\\',this)" title="Copy art URL to clipboard">&#128203; Art URL</button>' : ""}}
+              ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy art URL to clipboard">&#128203; Art URL</button>` : ""}}
               ${{confidenceBadge(r.score)}}
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
@@ -4044,6 +4048,18 @@ function logClickDebug(source, msg, extra = null) {{
   box.style.display = "block";
   box.textContent = `${{line}}\n${{box.textContent}}`.slice(0, 5000);
 }}
+
+window.addEventListener("error", (e) => {{
+  const msg = `[window.error] ${{e.message}} @ ${{e.filename}}:${{e.lineno}}:${{e.colno}}`;
+  console.error(msg, e.error);
+  logClickDebug("window", msg);
+}});
+
+window.addEventListener("unhandledrejection", (e) => {{
+  const msg = `[unhandledrejection] ${{String(e.reason || "unknown")}}`;
+  console.error(msg);
+  logClickDebug("window", msg);
+}});
 
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
@@ -4378,8 +4394,28 @@ function applyGenreSuggestion(genre) {{
     `<span style="color:#065f46;font-size:.82rem">\u2713 Applied: ${{esc(genre)}}</span>`;
 }}
 
-loadDir();
-loadKeyStatus();
+(async function init(){{
+  logClickDebug("init", "Starting init");
+  try {{
+    const pingRes = await fetch("/api/ping");
+    const pingData = await pingRes.json();
+    logClickDebug("init", "ping", pingData);
+  }} catch(e) {{
+    logClickDebug("init", "ping failed", {{ error: String(e) }});
+  }}
+  try {{
+    await loadDir();
+    logClickDebug("init", "loadDir ok");
+  }} catch(e) {{
+    logClickDebug("init", "loadDir failed", {{ error: String(e) }});
+  }}
+  try {{
+    await loadKeyStatus();
+    logClickDebug("init", "loadKeyStatus ok");
+  }} catch(e) {{
+    logClickDebug("init", "loadKeyStatus failed", {{ error: String(e) }});
+  }}
+}})();
 </script>
 </body>
 </html>"""
