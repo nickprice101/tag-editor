@@ -3034,6 +3034,7 @@ def ui_home():
   <form id="tagForm" method="POST" action="/update">
     <input type="hidden" name="path" id="path" value="{path}"/>
     <div id="currentFile" class="hint" style="margin-bottom:8px;font-size:.88rem">Double-click a file in Browse or Search to load it for editing.</div>
+    <pre id="clickDebug" class="hint" style="margin:0 0 10px 0;font-size:.75rem;display:none;max-height:120px;overflow:auto;white-space:pre-wrap"></pre>
     <div id="loadMsg" class="hint"></div>
 
     <hr class="section-sep"/>
@@ -3983,13 +3984,31 @@ function lastfm() {{
 let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
 let _lastLoadRequest = {{ path: "", ts: 0 }};
+const CLICK_DEBUG_ENABLED = new URLSearchParams(window.location.search).get("clickDebug") === "1";
+
+function logClickDebug(source, msg, extra = null) {{
+  if(!CLICK_DEBUG_ENABLED) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const suffix = extra ? ` | ${{JSON.stringify(extra)}}` : "";
+  const line = `[${{ts}}] [${{source}}] ${{msg}}${{suffix}}`;
+  console.debug(line);
+  const box = document.getElementById("clickDebug");
+  if(!box) return;
+  box.style.display = "block";
+  box.textContent = `${{line}}\n${{box.textContent}}`.slice(0, 5000);
+}}
+
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
 function requestLoadFile(path) {{
   if(!path) return;
   const now = Date.now();
-  if(_lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) return;
+  if(_lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) {{
+    logClickDebug("requestLoadFile", "Skipped duplicate load request", {{ path, deltaMs: now - _lastLoadRequest.ts }});
+    return;
+  }}
   _lastLoadRequest = {{ path, ts: now }};
+  logClickDebug("requestLoadFile", "Loading file", {{ path }});
   loadFileByPath(path);
 }}
 
@@ -3999,6 +4018,7 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   if(!item) return;
   const it = _dirItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
+  logClickDebug("dirList", "click", {{ detail: e.detail, type: it.type, path: it.path }});
   if(it.type === "dir") openDir(it.path);
   else {{
     const wasSelected = item.classList.contains("selected");
@@ -4013,6 +4033,7 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(item){{
     const idx = parseInt(item.dataset.idx, 10);
     const it = _dirItems[idx];
+    logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
     if(it && it.type !== "dir" && it.path){{
       requestLoadFile(it.path);
       return;
@@ -4028,6 +4049,7 @@ document.getElementById("sList").addEventListener("click", function(e){{
   if(!item) return;
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
+  logClickDebug("sList", "click", {{ detail: e.detail, path: it.path }});
   const wasSelected = item.classList.contains("selected");
   openFile(it.path);
   // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
@@ -4039,6 +4061,7 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(item){{
     const idx = parseInt(item.dataset.idx, 10);
     const it = _searchItems[idx];
+    logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
     if(it && it.path){{
       requestLoadFile(it.path);
       return;
