@@ -2433,47 +2433,52 @@ def api_acoustid_stream():
     path_arg = request.args.get("path", "")
 
     def generate():
-        if not ACOUSTID_KEY:
-            yield sse_event("apierror", "ACOUSTID_KEY not set.")
-            return
         try:
-            path = safe_path(path_arg)
-        except ValueError as exc:
-            yield sse_event("apierror", str(exc))
-            return
-        yield sse_event("log", "Computing audio fingerprint\u2026")
-
-        def do_match(pth):
-            return acoustid.match(ACOUSTID_KEY, pth, meta="recordings releases", parse=False)
-
-        try:
-            results = do_match(path)
-        except Exception as e:
-            msg = str(e).lower()
-            if "could not be decoded" in msg or "decode" in msg:
-                yield sse_event("log", "Decode error, trying ffmpeg fallback\u2026")
-                try:
-                    with tempfile.TemporaryDirectory() as td:
-                        wav = os.path.join(td, "tmp.wav")
-                        yield sse_event("log", "Converting audio with ffmpeg\u2026")
-                        proc = subprocess.run(
-                            ["ffmpeg", "-y", "-v", "error", "-i", path, "-t", "60", "-ac", "2", "-ar", "44100", wav],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-                        )
-                        if proc.returncode != 0:
-                            yield sse_event("apierror", f"ffmpeg error: {proc.stderr.strip()[:400]}")
-                            return
-                        yield sse_event("log", "Querying AcoustID\u2026")
-                        results = do_match(wav)
-                except Exception as e2:
-                    yield sse_event("apierror", f"AcoustID lookup failed after ffmpeg fallback: {e2}")
-                    return
-            else:
-                yield sse_event("apierror", f"AcoustID lookup failed: {e}")
+            if not ACOUSTID_KEY:
+                yield sse_event("apierror", "ACOUSTID_KEY not set.")
                 return
-        out = list(islice(_parse_acoustid_response(results), 10))
-        yield sse_event("log", f"Found {len(out)} match(es).")
-        yield sse_event("result", json.dumps({"results": out}))
+            try:
+                path = safe_path(path_arg)
+            except ValueError as exc:
+                yield sse_event("apierror", str(exc))
+                return
+            yield sse_event("log", "Computing audio fingerprint\u2026")
+
+            def do_match(pth):
+                return acoustid.match(ACOUSTID_KEY, pth, meta="recordings releases", parse=False)
+
+            try:
+                results = do_match(path)
+            except Exception as e:
+                msg = str(e).lower()
+                if "could not be decoded" in msg or "decode" in msg:
+                    yield sse_event("log", "Decode error, trying ffmpeg fallback\u2026")
+                    try:
+                        with tempfile.TemporaryDirectory() as td:
+                            wav = os.path.join(td, "tmp.wav")
+                            yield sse_event("log", "Converting audio with ffmpeg\u2026")
+                            proc = subprocess.run(
+                                ["ffmpeg", "-y", "-v", "error", "-i", path, "-t", "60", "-ac", "2", "-ar", "44100", wav],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                            )
+                            if proc.returncode != 0:
+                                yield sse_event("apierror", f"ffmpeg error: {proc.stderr.strip()[:400]}")
+                                return
+                            yield sse_event("log", "Querying AcoustID\u2026")
+                            results = do_match(wav)
+                    except Exception as e2:
+                        yield sse_event("apierror", f"AcoustID lookup failed after ffmpeg fallback: {e2}")
+                        return
+                else:
+                    yield sse_event("apierror", f"AcoustID lookup failed: {e}")
+                    return
+            out = list(islice(_parse_acoustid_response(results), 10))
+            yield sse_event("log", f"Found {len(out)} match(es).")
+            yield sse_event("result", json.dumps({"results": out}))
+        except Exception as e:
+            # Keep SSE clients from seeing a bare "Connection lost" when an unexpected
+            # exception escapes the normal AcoustID error handling path.
+            yield sse_event("apierror", f"Unexpected AcoustID stream error: {e}")
 
     return sse_response(generate())
 
