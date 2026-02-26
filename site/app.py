@@ -2051,8 +2051,10 @@ def api_web_search_stream():
                             _retry_best = max((x.get("score", 0) for x in _retry_non_fb), default=0)
                             yield sse_event("log", f"{site_name}: pass 2 q={retry_q_out!r} \u2014 {len(_retry_non_fb)} result(s), best score {_retry_best}")
                             if _retry_non_fb:
-                                found = _retry_found
-                                yield sse_event("log", f"{site_name}: retry replaced first-pass results")
+                                _merged_non_fb = _deduplicate_by_url(_non_fb_first + _retry_non_fb)
+                                _fb_items = [x for x in found if x.get("is_fallback")]
+                                found = _merged_non_fb + _fb_items
+                                yield sse_event("log", f"{site_name}: retry added {len(_retry_non_fb)} result(s); merged total {len(_merged_non_fb)} structured result(s)")
                             else:
                                 yield sse_event("log", f"{site_name}: retry found no structured results \u2014 keeping first-pass")
                         except Exception as _retry_exc:
@@ -2162,8 +2164,10 @@ def api_web_search_stream():
                     _bc_retry_best = max((x.get("score", 0) for x in _bc_retry_non_fb), default=0)
                     yield sse_event("log", f"Bandcamp: pass 2 q={retry_q_out!r} \u2014 {len(_bc_retry_non_fb)} result(s), best score {_bc_retry_best}")
                     if _bc_retry_non_fb:
-                        found = _bc_retry_found
-                        yield sse_event("log", f"Bandcamp: retry replaced first-pass results")
+                        _bc_merged_non_fb = _deduplicate_by_url(_bc_non_fb_first + _bc_retry_non_fb)
+                        _bc_fb_items = [x for x in found if x.get("is_fallback")]
+                        found = _bc_merged_non_fb + _bc_fb_items
+                        yield sse_event("log", f"Bandcamp: retry added {len(_bc_retry_non_fb)} result(s); merged total {len(_bc_merged_non_fb)} structured result(s)")
                     else:
                         yield sse_event("log", f"Bandcamp: retry found no structured results \u2014 keeping first-pass")
                 except Exception as _bc_retry_exc:
