@@ -3899,7 +3899,17 @@ function lastfm() {{
 
 let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
+let _lastListClick = {{ path: "", ts: 0, list: "" }};
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
+
+function handlePossibleDoubleClick(path, listName) {{
+  if(!path) return;
+  const now = Date.now();
+  const sameItem = _lastListClick.path === path && _lastListClick.list === listName;
+  const fastRepeat = (now - _lastListClick.ts) <= 420;
+  _lastListClick = {{ path, ts: now, list: listName }};
+  if(sameItem && fastRepeat) loadFileByPath(path);
+}}
 
 document.getElementById("dirList").addEventListener("click", function(e){{
   if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
@@ -3908,16 +3918,19 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   const it = _dirItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   if(it.type === "dir") openDir(it.path);
-  else openFile(it.path);
+  else {{
+    openFile(it.path);
+    handlePossibleDoubleClick(it.path, "dirList");
+  }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const type = item.dataset.type;
-    const path = item.dataset.path;
-    if(type && type !== "dir" && path){{
-      loadFileByPath(path);
+    const idx = parseInt(item.dataset.idx, 10);
+    const it = _dirItems[idx];
+    if(it && it.type !== "dir" && it.path){{
+      loadFileByPath(it.path);
       return;
     }}
   }}
@@ -3932,14 +3945,16 @@ document.getElementById("sList").addEventListener("click", function(e){{
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   openFile(it.path);
+  handlePossibleDoubleClick(it.path, "sList");
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const path = item.dataset.path;
-    if(path){{
-      loadFileByPath(path);
+    const idx = parseInt(item.dataset.idx, 10);
+    const it = _searchItems[idx];
+    if(it && it.path){{
+      loadFileByPath(it.path);
       return;
     }}
   }}
