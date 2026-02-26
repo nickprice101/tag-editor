@@ -3565,11 +3565,14 @@ function openFile(p){{
 }}
 
 async function loadFileByPath(p){{
+  const seq = ++_activeLoad.seq;
+  _activeLoad.path = p;
   document.getElementById("path").value = p;
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
-  await loadTags();
+  const loaded = await loadTags(seq);
+  if(!loaded) return;
   showToast(`Loaded ${{fn}}`, "info", 1400);
   // Load audio player
   const audio = document.getElementById("audioPlayer");
@@ -3629,15 +3632,27 @@ const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_rele
   "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
   "barcode","asin"];
 
-async function loadTags(){{
+async function loadTags(seq = 0){{
   const p = document.getElementById("path").value.trim();
   const msg = document.getElementById("loadMsg");
-  if(!p){{ msg.textContent = "No file selected. Double-click a file in Browse or Search to load."; return; }}
+  if(!p){{ msg.textContent = "No file selected. Double-click a file in Browse or Search to load."; return false; }}
   clearLookupResults();
   msg.textContent = "Loading\u2026";
-  const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
-  const data = await res.json();
-  if(!res.ok){{ msg.textContent = data.error || "Error"; return; }}
+  let res;
+  let data;
+  try {{
+    res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
+    data = await res.json();
+  }} catch(err) {{
+    msg.textContent = "Load failed (network/browser error).";
+    logClickDebug("loadTags", "fetch failed", {{ path: p, error: String(err || "unknown") }});
+    return false;
+  }}
+  if(seq && seq !== _activeLoad.seq) {{
+    logClickDebug("loadTags", "Ignored stale response", {{ path: p, seq, activeSeq: _activeLoad.seq }});
+    return false;
+  }}
+  if(!res.ok){{ msg.textContent = data.error || "Error"; return false; }}
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
     "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
     "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm",...MB_FIELDS]){{
@@ -3683,6 +3698,7 @@ async function loadTags(){{
     wsq.value = autoVal;
     _wsqAutoValue = autoVal;
   }}
+  return true;
 }}
 
 function mbSearchDialog(){{
@@ -3984,6 +4000,7 @@ function lastfm() {{
 let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
 let _lastLoadRequest = {{ path: "", ts: 0 }};
+let _activeLoad = {{ seq: 0, path: "" }};
 const CLICK_DEBUG_ENABLED = new URLSearchParams(window.location.search).get("clickDebug") === "1";
 
 function logClickDebug(source, msg, extra = null) {{
@@ -4000,15 +4017,17 @@ function logClickDebug(source, msg, extra = null) {{
 
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
-function requestLoadFile(path) {{
+function requestLoadFile(path, opts = {{}}) {{
   if(!path) return;
+  const force = !!opts.force;
+  const reason = opts.reason || "";
   const now = Date.now();
-  if(_lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) {{
-    logClickDebug("requestLoadFile", "Skipped duplicate load request", {{ path, deltaMs: now - _lastLoadRequest.ts }});
+  if(!force && _lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) {{
+    logClickDebug("requestLoadFile", "Skipped duplicate load request", {{ path, deltaMs: now - _lastLoadRequest.ts, reason }});
     return;
   }}
   _lastLoadRequest = {{ path, ts: now }};
-  logClickDebug("requestLoadFile", "Loading file", {{ path }});
+  logClickDebug("requestLoadFile", "Loading file", {{ path, reason, force }});
   loadFileByPath(path);
 }}
 
@@ -4023,8 +4042,9 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   else {{
     const wasSelected = item.classList.contains("selected");
     openFile(it.path);
-    // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
+    // Load on repeated single-clicks of an already-selected file.
+    // True double-click loads are handled in the separate dblclick listener.
+    if(e.detail === 1 && wasSelected) requestLoadFile(it.path, {{ reason: "click-on-selected" }});
   }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
@@ -4035,12 +4055,12 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
     const it = _dirItems[idx];
     logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
     if(it && it.type !== "dir" && it.path){{
-      requestLoadFile(it.path);
+      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
@@ -4052,8 +4072,9 @@ document.getElementById("sList").addEventListener("click", function(e){{
   logClickDebug("sList", "click", {{ detail: e.detail, path: it.path }});
   const wasSelected = item.classList.contains("selected");
   openFile(it.path);
-  // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
+  // Load on repeated single-clicks of an already-selected file.
+  // True double-click loads are handled in the separate dblclick listener.
+  if(e.detail === 1 && wasSelected) requestLoadFile(it.path, {{ reason: "click-on-selected" }});
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
@@ -4063,12 +4084,12 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
     const it = _searchItems[idx];
     logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
     if(it && it.path){{
-      requestLoadFile(it.path);
+      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
