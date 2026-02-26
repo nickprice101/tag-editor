@@ -4021,62 +4021,36 @@ function requestLoadFile(path, opts = {{}}) {{
 }}
 
 document.getElementById("dirList").addEventListener("click", function(e){{
-  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
-  const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _dirItems[parseInt(item.dataset.idx, 10)];
-  if(!it) return;
-  logClickDebug("dirList", "click", {{ detail: e.detail, type: it.type, path: it.path }});
-  if(it.type === "dir") openDir(it.path);
-  else {{
-    const wasSelected = item.classList.contains("selected");
-    openFile(it.path);
-    // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
-  }}
+  // Single click is intentionally inert for browse/search items.
+  if(e.target.closest(".file-item-select")) updateBulkCount();
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(item){{
-    const idx = parseInt(item.dataset.idx, 10);
-    const it = _dirItems[idx];
-    logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
-    if(it && it.type !== "dir" && it.path){{
-      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
-      return;
-    }}
+  if(!item) return;
+  const idx = parseInt(item.dataset.idx, 10);
+  const it = _dirItems[idx];
+  logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
+  if(!it || !it.path) return;
+  if(it.type === "dir") {{
+    openDir(it.path);
+    return;
   }}
-  const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
+  requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
-  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
-  const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _searchItems[parseInt(item.dataset.idx, 10)];
-  if(!it) return;
-  logClickDebug("sList", "click", {{ detail: e.detail, path: it.path }});
-  const wasSelected = item.classList.contains("selected");
-  openFile(it.path);
-  // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
+  // Single click is intentionally inert for browse/search items.
+  if(e.target.closest(".file-item-select")) updateBulkCount();
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(item){{
-    const idx = parseInt(item.dataset.idx, 10);
-    const it = _searchItems[idx];
-    logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
-    if(it && it.path){{
-      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
-      return;
-    }}
-  }}
-  const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
+  if(!item) return;
+  const idx = parseInt(item.dataset.idx, 10);
+  const it = _searchItems[idx];
+  logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
+  if(it && it.path) requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
