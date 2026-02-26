@@ -57,7 +57,9 @@ from app import (_split_query_artist_title, normalize_search_query,  # noqa: E40
                  _normalize_remix_handle, _remix_match_level,
                  obfuscate_key, _REMIX_KW_RE, re,
                  _build_retry_query, _site_search_url,
-                 _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE)
+                 _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE,
+                 _should_retry_without_remix, _RETRY_SUFFICIENT_HITS,
+                 _juno_thumb_to_full)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +441,36 @@ def test_build_retry_query_empty_inputs():
 def test_build_retry_query_artist_only():
     """Only artist, no title: returns lowercased artist."""
     assert _build_retry_query("Adi Oasis", "") == "adi oasis"
+
+
+# ---------------------------------------------------------------------------
+# retry gating
+# ---------------------------------------------------------------------------
+
+def test_should_retry_without_remix_when_low_score_and_few_hits():
+    """Retry runs only when first-pass quality is low and hit count is insufficient."""
+    assert _should_retry_without_remix(True, "artist song", "artist song remix", 65.0, 1) is True
+
+
+def test_should_not_retry_when_first_pass_has_sufficient_hits():
+    """A sufficiently populated first pass suppresses the retry."""
+    assert _should_retry_without_remix(True, "artist song", "artist song remix", 10.0, _RETRY_SUFFICIENT_HITS) is False
+
+
+# ---------------------------------------------------------------------------
+# Juno thumbnail conversion
+# ---------------------------------------------------------------------------
+
+def test_juno_thumb_to_full_converts_known_thumbnail_pattern():
+    """Juno 150px thumbnail URLs are converted to full-size BIG cover URLs."""
+    thumb = "https://imagescdn.junodownload.com/150/CS5550603-02A.jpg"
+    assert _juno_thumb_to_full(thumb) == "https://imagescdn.junodownload.com/full/CS5550603-02A-BIG.jpg"
+
+
+def test_juno_thumb_to_full_leaves_other_urls_unchanged():
+    """URLs not matching the known thumbnail pattern are returned unchanged."""
+    src = "https://example.com/image.jpg"
+    assert _juno_thumb_to_full(src) == src
 
 
 # ---------------------------------------------------------------------------
