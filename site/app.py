@@ -3337,9 +3337,7 @@ function updateAllRevertUI() {{
 }}
 
 function setBaseline(data) {{
-  const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "catalog_number","bpm","art_url",...MB_FIELDS];
+  const keys = TAG_FIELDS;
   _baseline = {{}};
   for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
   document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
@@ -3389,7 +3387,7 @@ async function applyBulkEdits() {{
     if(!res.ok) continue;
     const fd = new FormData();
     fd.set("path", p);
-    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","catalog_number","bpm","art_url",...MB_FIELDS];
+    const keys = TAG_FIELDS;
     for(const k of keys) fd.set(k, data[k] || "");
     if(genre) fd.set("genre", genre);
     if(album) fd.set("album", album);
@@ -3661,6 +3659,10 @@ const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_rele
   "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
   "barcode","asin"];
 
+const TAG_FIELDS = ["title","artist","album","albumartist","involved_people_list","date","genre",
+  "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+  "catalog_number","bpm","art_url",...MB_FIELDS];
+
 async function loadTags(pathOrSeq = "", seq = 0){{
   // Backward compatibility: loadTags(seq) and loadTags(path, seq) are both supported.
   let p = "";
@@ -3689,9 +3691,7 @@ async function loadTags(pathOrSeq = "", seq = 0){{
     return false;
   }}
   if(!res.ok){{ msg.textContent = data.error || "Error"; return false; }}
-  for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "catalog_number","bpm",...MB_FIELDS]){{
+  for(const k of TAG_FIELDS){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   // Autopopulate year from date (only if year is blank)
@@ -4277,9 +4277,7 @@ async function revertTags() {{
   const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
   const data = await res.json();
   if(!res.ok) return;
-  for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
-    "catalog_number","bpm","art_url",...MB_FIELDS]){{
+  for(const k of TAG_FIELDS){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
   // Autopopulate year from date (only if year is blank)
