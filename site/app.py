@@ -3780,7 +3780,7 @@ function runMbSearch(){{
         const artUrl = r.cover_image || "";
         const thumbUrl = r.thumb || "";
         return `<div class="result-item" style="margin-top:8px">
-          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(artUrl||thumbUrl)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(artUrl||thumbUrl)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'×\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>${{confidenceBadge(r.score)}}
           ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
@@ -3949,7 +3949,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'×\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
