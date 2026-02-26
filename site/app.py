@@ -3908,16 +3908,19 @@ document.getElementById("dirList").addEventListener("click", function(e){{
   const it = _dirItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   if(it.type === "dir") openDir(it.path);
-  else openFile(it.path);
+  else {{
+    openFile(it.path);
+    if(e.detail >= 2) loadFileByPath(it.path);
+  }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const type = item.dataset.type;
-    const path = item.dataset.path;
-    if(type && type !== "dir" && path){{
-      loadFileByPath(path);
+    const idx = parseInt(item.dataset.idx, 10);
+    const it = _dirItems[idx];
+    if(it && it.type !== "dir" && it.path){{
+      loadFileByPath(it.path);
       return;
     }}
   }}
@@ -3932,14 +3935,16 @@ document.getElementById("sList").addEventListener("click", function(e){{
   const it = _searchItems[parseInt(item.dataset.idx, 10)];
   if(!it) return;
   openFile(it.path);
+  if(e.detail >= 2) loadFileByPath(it.path);
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
   if(item){{
-    const path = item.dataset.path;
-    if(path){{
-      loadFileByPath(path);
+    const idx = parseInt(item.dataset.idx, 10);
+    const it = _searchItems[idx];
+    if(it && it.path){{
+      loadFileByPath(it.path);
       return;
     }}
   }}
