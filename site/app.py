@@ -4030,6 +4030,7 @@ let _dirItems = [], _searchItems = [];
 let _wsqAutoValue = "";
 let _lastLoadRequest = {{ path: "", ts: 0 }};
 let _activeLoad = {{ seq: 0, path: "" }};
+let _listClickState = {{ dirList: {{ idx: -1, ts: 0 }}, sList: {{ idx: -1, ts: 0 }} }};
 const CLICK_DEBUG_ENABLED = new URLSearchParams(window.location.search).get("clickDebug") === "1";
 
 function logClickDebug(source, msg, extra = null) {{
@@ -4067,9 +4068,35 @@ async function requestLoadFile(path, opts = {{}}) {{
   }}
 }}
 
+function handleListItemActivation(listName, item) {{
+  if(!item || !item.path) return;
+  if(item.type === "dir") {{
+    openDir(item.path);
+    return;
+  }}
+  requestLoadFile(item.path, {{ force: true, reason: `${{listName}}-activate` }});
+}}
+
+function trackListClick(listName, idx, item) {{
+  if(!item) return;
+  if(item.path) openFile(item.path);
+  const now = Date.now();
+  const prev = _listClickState[listName] || {{ idx: -1, ts: 0 }};
+  const isDouble = prev.idx === idx && (now - prev.ts) < 375;
+  _listClickState[listName] = {{ idx, ts: now }};
+  if(isDouble) {{
+    logClickDebug(listName, "synthetic-double-activate", {{ idx, type: item?.type || null, path: item?.path || null }});
+    handleListItemActivation(listName, item);
+  }}
+}}
+
 document.getElementById("dirList").addEventListener("click", function(e){{
-  // Single click is intentionally inert for browse/search items.
-  if(e.target.closest(".file-item-select")) updateBulkCount();
+  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
+  const row = e.target.closest("[data-idx]");
+  if(!row) return;
+  const idx = parseInt(row.dataset.idx, 10);
+  const it = _dirItems[idx];
+  trackListClick("dirList", idx, it);
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
@@ -4078,17 +4105,16 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
   const idx = parseInt(item.dataset.idx, 10);
   const it = _dirItems[idx];
   logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
-  if(!it || !it.path) return;
-  if(it.type === "dir") {{
-    openDir(it.path);
-    return;
-  }}
-  requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
+  handleListItemActivation("dirList", it);
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
-  // Single click is intentionally inert for browse/search items.
-  if(e.target.closest(".file-item-select")) updateBulkCount();
+  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
+  const row = e.target.closest("[data-idx]");
+  if(!row) return;
+  const idx = parseInt(row.dataset.idx, 10);
+  const it = _searchItems[idx];
+  trackListClick("sList", idx, it);
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
@@ -4097,7 +4123,7 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
   const idx = parseInt(item.dataset.idx, 10);
   const it = _searchItems[idx];
   logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
-  if(it && it.path) requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
+  handleListItemActivation("sList", it);
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
