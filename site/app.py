@@ -666,10 +666,14 @@ def upsert_id3(mp3_path: str, fields: dict):
     set_text_frame(tags, TCON, fields.get("genre"))
     set_text_frame(tags, TRCK, fields.get("track"))
     set_text_frame(tags, TPUB, fields.get("publisher"))
-    set_text_frame(tags, TMED, fields.get("media_type"))
-    set_text_frame(tags, TPOS, fields.get("part_of_a_set"))
-    set_text_frame(tags, TCMP, fields.get("part_of_a_compilation"))
-    set_text_frame(tags, TSSE, fields.get("encoder_settings"))
+    if "media_type" in fields:
+        set_text_frame(tags, TMED, fields.get("media_type"))
+    if "part_of_a_set" in fields:
+        set_text_frame(tags, TPOS, fields.get("part_of_a_set"))
+    if "part_of_a_compilation" in fields:
+        set_text_frame(tags, TCMP, fields.get("part_of_a_compilation"))
+    if "encoder_settings" in fields:
+        set_text_frame(tags, TSSE, fields.get("encoder_settings"))
 
     bpm_raw = (fields.get("bpm") or "").strip()
     if bpm_raw:
@@ -729,15 +733,18 @@ def upsert_id3(mp3_path: str, fields: dict):
     else:
         tags.delall("TSO2")
 
-    unique_file_identifier = (fields.get("unique_file_identifier") or "").strip()
-    if unique_file_identifier:
-        tags.setall("UFID", [UFID(owner="StarbuckRadio", data=unique_file_identifier.encode("utf-8"))])
-    else:
-        tags.delall("UFID")
+    if "unique_file_identifier" in fields:
+        unique_file_identifier = (fields.get("unique_file_identifier") or "").strip()
+        if unique_file_identifier:
+            tags.setall("UFID", [UFID(owner="StarbuckRadio", data=unique_file_identifier.encode("utf-8"))])
+        else:
+            tags.delall("UFID")
 
     # extra fields
-    set_txxx(tags, "label", fields.get("label", ""))
-    set_txxx(tags, "catalog_number", fields.get("catalog_number", ""))
+    if "label" in fields:
+        set_txxx(tags, "label", fields.get("label", ""))
+    set_txxx(tags, "CATALOGNUMBER", fields.get("catalog_number", ""))
+    set_txxx(tags, "catalog_number", "")
 
     # MusicBrainz Picard TXXX fields
     for mb_key in MB_TXXX_FIELDS:
@@ -795,7 +802,7 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "involved": get_text(tags, "TIPL"),
         "involved_people_list": get_txxx(tags, "involved_people_list"),
         "label": get_txxx(tags, "label"),
-        "catalog_number": get_txxx(tags, "catalog_number"),
+        "catalog_number": get_txxx(tags, "CATALOGNUMBER") or get_txxx(tags, "catalog_number"),
         "bpm": get_text(tags, "TBPM"),
         "has_art": bool(tags.getall("APIC")),
         "length_seconds": float(getattr(mp3.info, "length", 0.0) or 0.0),
@@ -3020,7 +3027,6 @@ def ui_home():
     <input id="bulkGenre" placeholder="Genre"/>
     <input id="bulkAlbum" placeholder="Album"/>
     <input id="bulkYear" placeholder="Year"/>
-    <input id="bulkLabel" placeholder="Label"/>
     <button type="button" class="btn btn-sm" onclick="applyBulkEdits()">Apply</button>
   </div>
 </div>
@@ -3083,8 +3089,6 @@ def ui_home():
         <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">Revert</button>
       </div>
       <div class="quick-actions">
-        <button type="button" class="chip-btn" onclick="copyYearToDate()">Set date from year</button>
-        <button type="button" class="chip-btn" onclick="copyDateToYear()">Set year from date</button>
         <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button>
       </div>
 
@@ -3106,8 +3110,8 @@ def ui_home():
       <div class="field-card">
         <h4>Release data</h4>
         <div class="field-grid-3">
-          <div class="field-group"><label>Date</label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
-          <div class="field-group"><label>Year</label><input name="year" placeholder="YYYY"/></div>
+          <div class="field-group"><label>Date <button type="button" class="chip-btn" onclick="copyYearToDate()">Set date from year</button></label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
+          <div class="field-group"><label>Year <button type="button" class="chip-btn" onclick="copyDateToYear()">Set year from date</button></label><input name="year" placeholder="YYYY"/></div>
           <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
         </div>
         <div class="field-grid-3">
@@ -3117,12 +3121,9 @@ def ui_home():
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
-          <div class="field-group"><label>Part of set</label><input name="part_of_a_set" placeholder="1/2"/></div>
         </div>
         <div class="field-grid-3">
           <div class="field-group"><label>BPM</label><input name="bpm" placeholder="(optional)"/></div>
-          <div class="field-group"><label>Media type</label><input name="media_type" placeholder="Digital Media"/></div>
-          <div class="field-group"><label>Compilation flag</label><input name="part_of_a_compilation" placeholder="0 or 1"/></div>
         </div>
         <div class="hint">BPM stored as <span class="mono">TBPM</span> (decimals truncated; non-numeric ignored)</div>
       </div>
@@ -3133,12 +3134,12 @@ def ui_home():
           <div class="field-group">
             <label>Artist sort</label>
             <input name="artist_sort" placeholder="Beatles, The"/>
-            <label class="inline-check"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is personal name</label>
+            <label class="inline-check"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Name?</label>
           </div>
           <div class="field-group">
             <label>Album artist sort</label>
             <input name="albumartist_sort" placeholder="Beatles, The"/>
-            <label class="inline-check"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is personal name</label>
+            <label class="inline-check"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Name?</label>
           </div>
         </div>
       </div>
@@ -3147,19 +3148,13 @@ def ui_home():
         <h4>Publishing and notes</h4>
         <div class="field-grid-2">
           <div class="field-group">
-            <label>Label</label><input name="label" placeholder="(optional)"/>
-            <div class="hint">Stored as <span class="mono">TXXX:label</span></div>
-          </div>
-          <div class="field-group">
             <label>Catalog number</label><input name="catalog_number" placeholder="(optional)"/>
-            <div class="hint">Stored as <span class="mono">TXXX:catalog_number</span></div>
+            <div class="hint">Stored as <span class="mono">TXXX:CATALOGNUMBER</span></div>
           </div>
         </div>
         <div class="field-grid-2">
           <div class="field-group"><label>Publisher</label><input name="publisher" placeholder="(optional)"/></div>
           <div class="field-group"><label>Comment</label><textarea name="comment" rows="3" placeholder="(optional)"></textarea></div>
-          <div class="field-group"><label>Encoder settings</label><input name="encoder_settings" placeholder="LAME3.100"/></div>
-          <div class="field-group"><label>Unique file ID</label><input name="unique_file_identifier" placeholder="(optional)"/></div>
         </div>
       </div>
 
@@ -3307,8 +3302,8 @@ function updateAllRevertUI() {{
 
 function setBaseline(data) {{
   const keys = ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
-    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS];
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "catalog_number","bpm","art_url",...MB_FIELDS];
   _baseline = {{}};
   for(const k of keys) _baseline[k] = data && data[k] !== undefined ? (data[k] || "") : (getField(k) || "");
   document.querySelectorAll("#tagForm input.dirty, #tagForm textarea.dirty").forEach(el => el.classList.remove("dirty"));
@@ -3350,8 +3345,7 @@ async function applyBulkEdits() {{
   const genre = document.getElementById("bulkGenre").value.trim();
   const album = document.getElementById("bulkAlbum").value.trim();
   const year = document.getElementById("bulkYear").value.trim();
-  const label = document.getElementById("bulkLabel").value.trim();
-  if(!genre && !album && !year && !label) {{ showToast("Enter at least one bulk field.", "error"); return; }}
+  if(!genre && !album && !year) {{ showToast("Enter at least one bulk field.", "error"); return; }}
   let done = 0;
   for(const p of paths) {{
     const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
@@ -3359,12 +3353,11 @@ async function applyBulkEdits() {{
     if(!res.ok) continue;
     const fd = new FormData();
     fd.set("path", p);
-    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort","media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS];
+    const keys = ["title","artist","album","albumartist","involved_people_list","date","genre","year","original_year","track","publisher","comment","artist_sort","albumartist_sort","catalog_number","bpm","art_url",...MB_FIELDS];
     for(const k of keys) fd.set(k, data[k] || "");
     if(genre) fd.set("genre", genre);
     if(album) fd.set("album", album);
     if(year) fd.set("year", year);
-    if(label) fd.set("label", label);
     fd.set("action", "write");
     const ures = await fetch("/update", {{method:"POST", body:fd}});
     if(ures.ok) done += 1;
@@ -3654,14 +3647,10 @@ async function loadTags(seq = 0){{
   }}
   if(!res.ok){{ msg.textContent = data.error || "Error"; return false; }}
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
-    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm",...MB_FIELDS]){{
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "catalog_number","bpm",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  // Autopopulate label/publisher (only if blank)
-  const lv = getField("label"), pv = getField("publisher");
-  if(lv && !pv) setField("publisher", lv);
-  if(pv && !lv) setField("label", pv);
   // Autopopulate year from date (only if year is blank)
   const dv = getField("date"), yv = getField("year");
   if(dv && !yv) setField("year", dv.substring(0,4));
@@ -4242,14 +4231,10 @@ async function revertTags() {{
   const data = await res.json();
   if(!res.ok) return;
   for(const k of ["title","artist","album","albumartist","involved_people_list","date","genre",
-    "year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment","artist_sort","albumartist_sort",
-    "media_type","encoder_settings","unique_file_identifier","label","catalog_number","bpm","art_url",...MB_FIELDS]){{
+    "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
+    "catalog_number","bpm","art_url",...MB_FIELDS]){{
     if(data[k] !== undefined) setField(k, data[k]);
   }}
-  // Autopopulate label/publisher (only if blank)
-  const lv = getField("label"), pv = getField("publisher");
-  if(lv && !pv) setField("publisher", lv);
-  if(pv && !lv) setField("label", pv);
   // Autopopulate year from date (only if year is blank)
   const dv = getField("date"), yv = getField("year");
   if(dv && !yv) setField("year", dv.substring(0,4));
@@ -4364,8 +4349,8 @@ def update():
 
         fields = {k: request.form.get(k, "") for k in [
             "title","artist","album","albumartist","involved_people_list",
-            "date","genre","year","original_year","track","part_of_a_set","part_of_a_compilation","publisher","comment",
-            "artist_sort","albumartist_sort","media_type","encoder_settings","unique_file_identifier","art_url","label","catalog_number",
+            "date","genre","year","original_year","track","publisher","comment",
+            "artist_sort","albumartist_sort","art_url","catalog_number",
             "bpm",
             *MB_TXXX_FIELDS,
         ]}
@@ -4387,7 +4372,6 @@ def update():
             "wrote_to": path,
             "archived_to": archived_to,
             "involved_people": normalize_involved_people(fields.get('involved_people_list', '')),
-            "label": fields.get('label', ''),
             "catalog_number": fields.get('catalog_number', ''),
         })
     except Exception as e:
