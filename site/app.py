@@ -4016,6 +4016,9 @@ function requestLoadFile(path, opts = {{}}) {{
     return;
   }}
   _lastLoadRequest = {{ path, ts: now }};
+  // Keep list selection/path state in sync before loading so a dblclick always
+  // updates the right panel from the exact item the user activated.
+  openFile(path);
   logClickDebug("requestLoadFile", "Loading file", {{ path, reason, force }});
   loadFileByPath(path);
 }}
