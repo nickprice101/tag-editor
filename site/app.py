@@ -58,6 +58,9 @@ HEADLESS_MAX_RESULTS = int(os.getenv("HEADLESS_MAX_RESULTS", "10"))
 # suppress the remix-retry search.  When all structured results score below this
 # threshold the retry is triggered even if structured results exist.
 _RETRY_SCORE_THRESHOLD = 78
+# Treat the first pass as sufficient when it already returns this many
+# structured results; in that case skip the remix-stripped retry pass.
+_RETRY_SUFFICIENT_HITS = 3
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
@@ -239,6 +242,28 @@ def _site_search_url(site_name: str, qq: str) -> str:
     if site_name == "Juno":
         return f"https://www.junodownload.com/search/?solrorder=relevancy&q%5Btitle%5D%5B0%5D={qq}"
     return ""
+
+
+def _juno_thumb_to_full(url: str) -> str:
+    """Convert Juno CDN thumbnail URLs to their full-size cover URLs."""
+    if not url:
+        return ""
+    return re.sub(r"/150/([A-Za-z0-9-]+)\.jpg$", r"/full/\1-BIG.jpg", url)
+
+
+def _should_retry_without_remix(retry_meaningful: bool, retry_q_out: str, norm_q_out: str,
+                                first_pass_best_score: float, first_pass_hit_count: int) -> bool:
+    """Decide whether the remix-stripped retry search should run.
+
+    Retry only when the first pass is both *low quality* (best score under the
+    threshold) and *insufficiently populated* (fewer than the sufficient-hit
+    threshold).
+    """
+    if not retry_meaningful or not retry_q_out or retry_q_out == norm_q_out:
+        return False
+    if first_pass_hit_count >= _RETRY_SUFFICIENT_HITS:
+        return False
+    return first_pass_best_score < _RETRY_SCORE_THRESHOLD
 
 
 def _split_query_artist_title(q: str) -> tuple:
@@ -1549,7 +1574,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 t = ""
                 raw_href = ""
             a = artist_el.get_text(strip=True) if artist_el else ""
-            thumb = img_el["src"] if img_el else ""
+            thumb = _juno_thumb_to_full(img_el["src"]) if img_el else ""
             if raw_href and not raw_href.startswith("http"):
                 raw_href = "https://www.junodownload.com" + raw_href
             if t and raw_href:
@@ -1574,7 +1599,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 t = title_el.get_text(strip=True) if title_el else ""
                 a = artist_el.get_text(strip=True) if artist_el else ""
                 raw_href = link_el["href"] if link_el else ""
-                thumb = img_el["src"] if img_el else ""
+                thumb = _juno_thumb_to_full(img_el["src"]) if img_el else ""
                 if raw_href and not raw_href.startswith("http"):
                     raw_href = "https://www.junodownload.com" + raw_href
                 # Extract track_number from a.juno-title href query string
@@ -1612,7 +1637,7 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                 img_el = item.find("img", src=True)
                 t = title_el.get_text(strip=True) if title_el else ""
                 a = artist_el.get_text(strip=True) if artist_el else ""
-                thumb = img_el["src"] if img_el else ""
+                thumb = _juno_thumb_to_full(img_el["src"]) if img_el else ""
                 if t and link_el:
                     url = "https://www.junodownload.com" + link_el["href"]
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
@@ -2033,10 +2058,11 @@ def api_web_search_stream():
                 # Per-site remix-retry: trigger when first pass has no good matches
                 # (no structured results, or best score below threshold).
                 _non_fb_first = [x for x in found if not x.get("is_fallback")]
+                _first_count = len(_non_fb_first)
                 _first_best = max((x.get("score", 0) for x in _non_fb_first), default=0)
                 if _retry_meaningful:
-                    yield sse_event("log", f"{site_name}: pass 1 q={norm_q_out!r} \u2014 {len(_non_fb_first)} result(s), best score {_first_best}")
-                if _retry_meaningful and retry_q_out and retry_q_out != norm_q_out and _first_best < _RETRY_SCORE_THRESHOLD:
+                    yield sse_event("log", f"{site_name}: pass 1 q={norm_q_out!r} \u2014 {_first_count} result(s), best score {_first_best}")
+                if _should_retry_without_remix(_retry_meaningful, retry_q_out, norm_q_out, _first_best, _first_count):
                     _retry_qq = requests.utils.quote(retry_q_out, safe="")
                     _retry_url = _site_search_url(site_name, _retry_qq)
                     if _retry_url:
@@ -2143,10 +2169,11 @@ def api_web_search_stream():
             # Per-site remix-retry for Bandcamp: trigger when first pass has no good
             # matches (no structured results, or best score below threshold).
             _bc_non_fb_first = [x for x in found if not x.get("is_fallback")]
+            _bc_first_count = len(_bc_non_fb_first)
             _bc_first_best = max((x.get("score", 0) for x in _bc_non_fb_first), default=0)
             if _retry_meaningful:
-                yield sse_event("log", f"Bandcamp: pass 1 q={norm_q_out!r} \u2014 {len(_bc_non_fb_first)} result(s), best score {_bc_first_best}")
-            if _retry_meaningful and retry_q_out and retry_q_out != norm_q_out and _bc_first_best < _RETRY_SCORE_THRESHOLD:
+                yield sse_event("log", f"Bandcamp: pass 1 q={norm_q_out!r} \u2014 {_bc_first_count} result(s), best score {_bc_first_best}")
+            if _should_retry_without_remix(_retry_meaningful, retry_q_out, norm_q_out, _bc_first_best, _bc_first_count):
                 _bc_retry_qq = requests.utils.quote(retry_q_out, safe="")
                 _bc_retry_url = f"https://bandcamp.com/search?q={_bc_retry_qq}&item_type=t"
                 yield sse_event("log", f"Bandcamp: retrying without remix \u2014 {norm_q_out!r} \u2192 {retry_q_out!r}")
@@ -2674,12 +2701,13 @@ def ui_home():
     input.dirty:focus, textarea.dirty:focus {{ box-shadow: 0 0 0 3px rgba(185,28,28,.15); }}
     textarea {{ resize: vertical; }}
     .hint {{ color: var(--muted); font-size: .78rem; margin: -8px 0 10px; }}
-    .field-wrap {{ position: relative; }}
+    .field-wrap {{ display: flex; align-items: flex-start; gap: 8px; }}
+    .field-wrap > input, .field-wrap > textarea {{ flex: 1; min-width: 0; margin-bottom: 0; }}
     .revert-btn {{
-      display: none; position: absolute; right: 6px; top: 6px;
+      display: none; flex: 0 0 auto;
       padding: 2px 7px; font-size: .75rem; font-weight: 600; line-height: 1.4;
       border: 1px solid #b91c1c; border-radius: 4px; background: #fff; color: #b91c1c;
-      cursor: pointer; z-index: 1;
+      cursor: pointer;
     }}
     .revert-btn:hover {{ background: #fef2f2; }}
     .field-wrap.dirty .revert-btn {{ display: inline-block; }}
@@ -2865,19 +2893,9 @@ def ui_home():
       <div class="row2">
         <div>
           <div class="field-group"><label>Title</label><input name="title"/></div>
-          <div class="field-group"><label>Artist</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input name="artist" style="flex:1;margin-bottom:0"/>
-              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is name?</label>
-            </div>
-          </div>
+          <div class="field-group"><label>Artist</label><input name="artist"/></div>
           <div class="field-group"><label>Album</label><input name="album"/></div>
-          <div class="field-group"><label>Album Artist (band)</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input name="albumartist" style="flex:1;margin-bottom:0"/>
-              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is name?</label>
-            </div>
-          </div>
+          <div class="field-group"><label>Album Artist (band)</label><input name="albumartist"/></div>
           <div class="field-group">
             <label>Involved people list</label>
             <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
@@ -2905,13 +2923,21 @@ def ui_home():
       <div class="row2">
         <div>
           <div class="field-group">
-            <label>Artist sort</label><input name="artist_sort" placeholder="Beatles, The"/>
+            <label>Artist sort</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input name="artist_sort" placeholder="Beatles, The" style="flex:1;margin-bottom:0"/>
+              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is name?</label>
+            </div>
             <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
           </div>
         </div>
         <div>
           <div class="field-group">
-            <label>Album artist sort</label><input name="albumartist_sort" placeholder="Beatles, The"/>
+            <label>Album artist sort</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input name="albumartist_sort" placeholder="Beatles, The" style="flex:1;margin-bottom:0"/>
+              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is name?</label>
+            </div>
             <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
           </div>
         </div>
