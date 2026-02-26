@@ -4000,15 +4000,17 @@ function logClickDebug(source, msg, extra = null) {{
 
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
-function requestLoadFile(path) {{
+function requestLoadFile(path, opts = {{}}) {{
   if(!path) return;
+  const force = !!opts.force;
+  const reason = opts.reason || "";
   const now = Date.now();
-  if(_lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) {{
-    logClickDebug("requestLoadFile", "Skipped duplicate load request", {{ path, deltaMs: now - _lastLoadRequest.ts }});
+  if(!force && _lastLoadRequest.path === path && (now - _lastLoadRequest.ts) < 650) {{
+    logClickDebug("requestLoadFile", "Skipped duplicate load request", {{ path, deltaMs: now - _lastLoadRequest.ts, reason }});
     return;
   }}
   _lastLoadRequest = {{ path, ts: now }};
-  logClickDebug("requestLoadFile", "Loading file", {{ path }});
+  logClickDebug("requestLoadFile", "Loading file", {{ path, reason, force }});
   loadFileByPath(path);
 }}
 
@@ -4024,7 +4026,7 @@ document.getElementById("dirList").addEventListener("click", function(e){{
     const wasSelected = item.classList.contains("selected");
     openFile(it.path);
     // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
+    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
   }}
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
@@ -4035,12 +4037,12 @@ document.getElementById("dirList").addEventListener("dblclick", function(e){{
     const it = _dirItems[idx];
     logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
     if(it && it.type !== "dir" && it.path){{
-      requestLoadFile(it.path);
+      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
@@ -4053,7 +4055,7 @@ document.getElementById("sList").addEventListener("click", function(e){{
   const wasSelected = item.classList.contains("selected");
   openFile(it.path);
   // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path);
+  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
@@ -4063,12 +4065,12 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
     const it = _searchItems[idx];
     logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
     if(it && it.path){{
-      requestLoadFile(it.path);
+      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
       return;
     }}
   }}
   const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath);
+  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
