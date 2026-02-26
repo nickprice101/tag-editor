@@ -2657,18 +2657,24 @@ def ui_home():
   <title>MP3 Tag Editor</title>
   <style>
     :root {{
-      --accent: #3b6fd4;
-      --border: #d1d5db;
-      --bg: #f9fafb;
+      --accent: #FF1A55;
+      --accent-strong: #e10045;
+      --accent-soft: #ffe6ee;
+      --accent-focus: rgba(255,26,85,.20);
+      --border: #e4e6eb;
+      --bg: #f5f7fb;
       --card-bg: #ffffff;
+      --card-alt: #fcfdff;
       --thumb-size: 44px;
-      --text: #111827;
-      --muted: #6b7280;
-      --min-bg: #fffbeb;
-      --min-border: #f59e0b;
-      --no-genre: #fff0f0;
-      --radius: 10px;
-      --shadow: 0 1px 4px rgba(0,0,0,.08);
+      --text: #131822;
+      --muted: #697386;
+      --min-bg: #fff8e8;
+      --min-border: #ffc145;
+      --no-genre: #fff2f6;
+      --radius: 14px;
+      --radius-sm: 10px;
+      --shadow: 0 8px 24px rgba(16, 24, 40, .07);
+      --shadow-soft: 0 2px 8px rgba(16, 24, 40, .05);
     }}
     *, *::before, *::after {{ box-sizing: border-box; }}
     body {{
@@ -2676,15 +2682,24 @@ def ui_home():
       background: var(--bg);
       color: var(--text);
       margin: 0;
-      padding: 16px 20px;
+      padding: 20px;
       max-width: 1300px;
+      line-height: 1.4;
     }}
-    h1 {{ font-size: 1.5rem; font-weight: 700; margin: 0 0 4px; }}
-    h2 {{ font-size: 1.1rem; font-weight: 600; margin: 0 0 10px; color: var(--accent); }}
+    h1 {{ font-size: 1.6rem; font-weight: 750; margin: 0 0 6px; letter-spacing: -.02em; }}
+    h2 {{ font-size: 1.05rem; font-weight: 700; margin: 0 0 10px; color: var(--accent-strong); letter-spacing: -.01em; }}
     h3 {{ font-size: .95rem; font-weight: 600; margin: 0 0 8px; }}
     p.sub {{ color: var(--muted); font-size: .85rem; margin: 0 0 16px; }}
+    .topbar {{
+      margin-bottom: 18px;
+      padding: 16px 18px;
+      background: linear-gradient(135deg, #ffffff 0%, #fff5f8 100%);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-soft);
+    }}
     .card {{
-      background: var(--card-bg);
+      background: linear-gradient(180deg, var(--card-bg) 0%, var(--card-alt) 100%);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 16px;
@@ -2700,12 +2715,12 @@ def ui_home():
     @media(max-width:1100px){{ .left-pane {{ position: static; }} }}
     label {{ display: block; font-size: .85rem; font-weight: 600; margin-bottom: 4px; }}
     input[type=text], input:not([type]), textarea {{
-      width: 100%; padding: 8px 10px;
-      border: 1px solid var(--border); border-radius: 6px;
+      width: 100%; padding: 11px 14px;
+      border: 1px solid #dfe3ea; border-radius: 16px;
       font-size: .9rem; background: #fff; color: var(--text);
-      margin-bottom: 12px; transition: border-color .15s;
+      margin-bottom: 10px; transition: border-color .15s, box-shadow .15s;
     }}
-    input:focus, textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,111,212,.15); }}
+    input:focus, textarea:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-focus); }}
     input.dirty, textarea.dirty {{ color: #b91c1c; border-color: #b91c1c; }}
     input.dirty:focus, textarea.dirty:focus {{ box-shadow: 0 0 0 3px rgba(185,28,28,.15); }}
     textarea {{ resize: vertical; }}
@@ -2727,26 +2742,66 @@ def ui_home():
     }}
     .field-wrap.dirty ~ .old-value {{ display: block; }}
     .btn {{
-      display: inline-block; padding: 8px 14px; font-size: .85rem; font-weight: 600;
-      border: none; border-radius: 6px; background: var(--accent); color: #fff;
-      cursor: pointer; margin-right: 6px; margin-bottom: 6px; transition: opacity .15s;
+      display: inline-block; padding: 9px 14px; font-size: .85rem; font-weight: 700;
+      border: 1px solid transparent; border-radius: var(--radius-sm);
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+      color: #fff;
+      cursor: pointer; margin-right: 6px; margin-bottom: 6px;
+      transition: transform .08s ease, filter .15s ease, box-shadow .15s ease;
+      box-shadow: 0 4px 12px rgba(225, 0, 69, .28);
     }}
-    .btn:hover {{ opacity: .88; }}
+    .btn:hover {{ filter: brightness(1.04); }}
+    .btn:active {{ transform: translateY(1px); }}
     .btn-sm {{ padding: 5px 10px; font-size: .8rem; }}
-    .btn-outline {{ background: transparent; border: 1px solid var(--accent); color: var(--accent); }}
-    .btn-ghost {{ background: #f3f4f6; color: var(--text); border: 1px solid var(--border); }}
+    .btn-outline {{ background: #fff; border: 1px solid var(--accent); color: var(--accent-strong); box-shadow: none; }}
+    .btn-ghost {{ background: #fff; color: var(--text); border: 1px solid var(--border); box-shadow: none; }}
+    .editor-main {{
+      padding: 20px;
+    }}
+    .section-panel {{
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 14px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-soft);
+    }}
+    .lookup-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0,1fr));
+      gap: 12px;
+    }}
+    @media(max-width:1100px){{ .lookup-grid {{ grid-template-columns: 1fr; }} }}
+    .lookup-card {{
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      padding: 12px;
+    }}
     .mono {{ font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: .82rem; }}
     .callout-min {{
-      border: 2px solid var(--min-border); background: var(--min-bg);
-      border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+      border: 1px solid var(--border); background: linear-gradient(180deg, #ffffff 0%, #fff8fb 100%);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+      box-shadow: var(--shadow-soft);
     }}
     .callout-min .callout-title {{
       font-size: .78rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .06em; color: #b45309; margin-bottom: 12px;
+      letter-spacing: .08em; color: var(--accent-strong); margin-bottom: 12px;
     }}
+
+    .field-grid-2 {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+    .field-grid-3 {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+    .field-card {{ border:1px solid var(--border); border-radius:16px; padding:12px; background:#fff; margin-bottom:12px; }}
+    .field-card h4 {{ margin:0 0 10px; font-size:.82rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }}
+    .quick-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }}
+    .chip-btn {{ border:1px solid #ffd2df; background:#fff6f9; color:var(--accent-strong); border-radius:999px; padding:5px 10px; font-size:.74rem; font-weight:700; cursor:pointer; }}
+    .chip-btn:hover {{ background:#ffeef4; }}
+    .inline-check {{ display:flex; align-items:center; gap:8px; margin-top:4px; font-size:.8rem; color:var(--muted); }}
+    .inline-check input {{ width:auto; margin:0; }}
+    @media(max-width:900px){{ .field-grid-2, .field-grid-3 {{ grid-template-columns:1fr; }} }}
     .file-list {{
       max-height: 380px; overflow-y: auto;
-      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card-bg);
+      border: 1px solid var(--border); border-radius: var(--radius); background: #fff;
     }}
     .file-item {{
       display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
@@ -2754,15 +2809,16 @@ def ui_home():
     }}
     .file-item-select {{ margin-top: 3px; }}
     .file-item:last-child {{ border-bottom: none; }}
-    .file-item:hover {{ background: #f0f4ff; }}
-    .file-item.selected {{ background: #dbeafe; }}
+    .file-item:hover {{ background: #fff0f5; }}
+    .file-item.selected {{ background: var(--accent-soft); }}
     .file-item.no-genre {{ background: var(--no-genre); }}
     .file-item.no-genre:hover {{ background: #ffe4e4; }}
-    .file-item.no-genre.selected {{ background: #dbeafe; }}
+    .file-item.no-genre.selected {{ background: var(--accent-soft); }}
     .file-thumb {{ width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; object-fit: cover; flex-shrink: 0; }}
     .file-thumb-placeholder {{
       width: var(--thumb-size); height: var(--thumb-size); border-radius: 6px; background: #e5e7eb;
-      flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 1.3rem;
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: .64rem;
+      font-weight: 700; letter-spacing: .04em; color: #4b5563;
     }}
     .file-meta {{ flex: 1; min-width: 0; }}
     .file-name {{ font-weight: 600; font-size: .88rem; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }}
@@ -2776,7 +2832,7 @@ def ui_home():
       display: flex; align-items: center; gap: 8px; padding: 7px 10px;
       cursor: pointer; border-bottom: 1px solid #f0f0f0; font-size: .88rem; font-weight: 500;
     }}
-    .dir-item:hover {{ background: #f0f4ff; }}
+    .dir-item:hover {{ background: #fff0f5; }}
     details.mb-section summary {{
       cursor: pointer; font-size: .95rem; font-weight: 600; color: var(--accent);
       padding: 8px 0; user-select: none; list-style: disclosure-closed;
@@ -2790,7 +2846,7 @@ def ui_home():
     .bulk-tools {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }}
     .bulk-tools input {{ width:auto; min-width:90px; margin-bottom:0; }}
     .bulk-count {{ font-size:.78rem; color:var(--muted); }}
-    .sticky-actions {{ position: sticky; bottom: 10px; z-index: 5; background: rgba(255,255,255,.96); border:1px solid var(--border); border-radius:10px; padding:10px; margin-top:10px; box-shadow: var(--shadow); }}
+    .sticky-actions {{ position: sticky; bottom: 10px; z-index: 5; background: rgba(255,255,255,.96); border:1px solid var(--border); border-radius:var(--radius); padding:10px; margin-top:10px; box-shadow: var(--shadow); }}
     .field-error {{ color:#991b1b; font-size:.76rem; margin:-8px 0 8px; display:none; }}
     .invalid {{ border-color:#991b1b !important; background:#fff1f2; }}
     #toastStack {{ position:fixed; right:14px; bottom:14px; display:flex; flex-direction:column; gap:8px; z-index:2000; }}
@@ -2813,7 +2869,7 @@ def ui_home():
     }}
     .stream-status {{
       font-size: .8rem; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-      padding: 5px 9px; border-radius: 6px; background: #f3f4f6;
+      padding: 5px 9px; border-radius: var(--radius-sm); background: #f8fafc;
       border: 1px solid var(--border); margin: 4px 0 8px;
       max-height: 110px; overflow-y: auto; display: none;
     }}
@@ -2825,8 +2881,10 @@ def ui_home():
 </head>
 <body>
 
-<h1>&#127925; MP3 Tag Editor</h1>
-<p class="sub">Music root: <span class="mono">{MUSIC_ROOT}</span></p>
+<div class="topbar">
+  <h1>MP3 Tag Editor</h1>
+  <p class="sub">Music root: <span class="mono">{MUSIC_ROOT}</span></p>
+</div>
 
 <div class="workspace">
   <div class="left-pane">
@@ -2838,7 +2896,7 @@ def ui_home():
     <label>Filter (optional)</label>
     <input id="dirFilter" placeholder="e.g. maribou or 2024"/>
     <button class="btn" type="button" onclick="loadDir()">Load</button>
-    <button class="btn btn-ghost" type="button" onclick="upDir()">&#8593; Up</button>
+    <button class="btn btn-ghost" type="button" onclick="upDir()">Up</button>
     <div class="bulk-tools">
       <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('dirList', true)">Select all</button>
       <button type="button" class="btn btn-sm btn-ghost" onclick="toggleVisibleListSelections('dirList', false)">Clear</button>
@@ -2882,7 +2940,7 @@ def ui_home():
   </div>
 
 <div class="right-pane">
-<div class="card">
+<div class="card editor-main">
   <h2>Edit Tags</h2>
   <p class="sub">Load a file, optionally use lookups, then write. Archive reorganises to <span class="mono">{MUSIC_ROOT}/Genre/AlbumArtist/Album [Year]/</span>.</p>
 
@@ -2893,25 +2951,25 @@ def ui_home():
 
     <hr class="section-sep"/>
 
-    <div class="card" style="background:var(--bg)">
+    <div class="section-panel">
       <h3>Lookups</h3>
-      <div class="row2">
-        <div>
-          <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">&#127925; MusicBrainz Search&hellip;</button>
+      <div class="lookup-grid">
+        <div class="lookup-card">
+          <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">MusicBrainz Search&hellip;</button>
           <div id="mbResults"></div>
         </div>
-        <div>
-          <button type="button" class="btn btn-outline" onclick="discogsSearch()">&#128191; Discogs Search (album)</button>
+        <div class="lookup-card">
+          <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
           <div id="discogsStatus" class="stream-status"></div>
           <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
           <div id="discogsResults"></div>
           <div id="discogsTracklist"></div>
         </div>
       </div>
-      <div class="row2" style="margin-top:12px">
-        <div>
+      <div class="lookup-grid" style="margin-top:12px">
+        <div class="lookup-card">
           <input id="wsq" placeholder="Web search: e.g. Artist \u2013 Title"/>
-          <button type="button" class="btn btn-outline" onclick="webSearch()">&#127760; Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
+          <button type="button" class="btn btn-outline" onclick="webSearch()">Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
           <div id="webSearchStatus" class="stream-status"></div>
           <div id="webSearchResults"></div>
           <hr class="section-sep"/>
@@ -2919,8 +2977,8 @@ def ui_home():
           <button type="button" class="btn btn-outline" onclick="parseUrl()">Parse URL</button>
           <div id="parseResults"></div>
         </div>
-        <div>
-          <button type="button" class="btn btn-outline" onclick="acoustid()">&#127925; AcoustID Fingerprint</button>
+        <div class="lookup-card">
+          <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
           <div id="acoustidStatus" class="stream-status"></div>
           <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
           <div id="acoustidResults"></div>
@@ -2933,87 +2991,96 @@ def ui_home():
 
     <div class="callout-min">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <div class="callout-title" style="margin-bottom:0">&#11088; Minimum required tags</div>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">&#8629; Revert</button>
+        <div class="callout-title" style="margin-bottom:0">Minimum required tags</div>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">Revert</button>
       </div>
-      <div class="row2">
-        <div>
+      <div class="quick-actions">
+        <button type="button" class="chip-btn" onclick="copyYearToDate()">Set date from year</button>
+        <button type="button" class="chip-btn" onclick="copyDateToYear()">Set year from date</button>
+        <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button>
+      </div>
+
+      <div class="field-card">
+        <h4>Core details</h4>
+        <div class="field-grid-2">
           <div class="field-group"><label>Title</label><input name="title"/></div>
           <div class="field-group"><label>Artist</label><input name="artist"/></div>
           <div class="field-group"><label>Album</label><input name="album"/></div>
           <div class="field-group"><label>Album Artist (band)</label><input name="albumartist"/></div>
-          <div class="field-group">
-            <label>Involved people list</label>
-            <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
-            <div class="hint">Stored as <span class="mono">TXXX:involved_people_list</span></div>
-          </div>
         </div>
-        <div>
+        <div class="field-group">
+          <label>Involved people list</label>
+          <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
+          <div class="hint">Stored as <span class="mono">TXXX:involved_people_list</span></div>
+        </div>
+      </div>
+
+      <div class="field-card">
+        <h4>Release data</h4>
+        <div class="field-grid-3">
           <div class="field-group"><label>Date</label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
           <div class="field-group"><label>Year</label><input name="year" placeholder="YYYY"/></div>
           <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
+        </div>
+        <div class="field-grid-3">
           <div class="field-group">
             <label>Genre</label>
             <input name="genre"/>
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
-          <div class="field-group">
-            <label>BPM</label><input name="bpm" placeholder="(optional)"/>
-            <div class="hint">Stored as <span class="mono">TBPM</span> (decimals truncated to integer; non-numeric ignored)</div>
-          </div>
-          <div class="field-group"><label>Publisher</label><input name="publisher" placeholder="(optional)"/></div>
-          <div class="field-group"><label>Comment</label><textarea name="comment" rows="3" placeholder="(optional)"></textarea></div>
+          <div class="field-group"><label>BPM</label><input name="bpm" placeholder="(optional)"/></div>
         </div>
+        <div class="hint">BPM stored as <span class="mono">TBPM</span> (decimals truncated; non-numeric ignored)</div>
       </div>
-      <div class="row2">
-        <div>
+
+      <div class="field-card">
+        <h4>Sort and credits</h4>
+        <div class="field-grid-2">
           <div class="field-group">
             <label>Artist sort</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input name="artist_sort" placeholder="Beatles, The" style="flex:1;margin-bottom:0"/>
-              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is name?</label>
-            </div>
-            <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
+            <input name="artist_sort" placeholder="Beatles, The"/>
+            <label class="inline-check"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Is personal name</label>
           </div>
-        </div>
-        <div>
           <div class="field-group">
             <label>Album artist sort</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input name="albumartist_sort" placeholder="Beatles, The" style="flex:1;margin-bottom:0"/>
-              <label style="font-weight:400;font-size:.82rem;white-space:nowrap"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is name?</label>
-            </div>
-            <div class="hint">Auto-generates for names starting with &ldquo;The &hellip;&rdquo;</div>
+            <input name="albumartist_sort" placeholder="Beatles, The"/>
+            <label class="inline-check"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Is personal name</label>
           </div>
         </div>
       </div>
-      <div class="row2">
-        <div>
+
+      <div class="field-card">
+        <h4>Publishing and notes</h4>
+        <div class="field-grid-2">
           <div class="field-group">
             <label>Label</label><input name="label" placeholder="(optional)"/>
             <div class="hint">Stored as <span class="mono">TXXX:label</span></div>
           </div>
-        </div>
-        <div>
           <div class="field-group">
             <label>Catalog number</label><input name="catalog_number" placeholder="(optional)"/>
             <div class="hint">Stored as <span class="mono">TXXX:catalog_number</span></div>
           </div>
         </div>
+        <div class="field-grid-2">
+          <div class="field-group"><label>Publisher</label><input name="publisher" placeholder="(optional)"/></div>
+          <div class="field-group"><label>Comment</label><textarea name="comment" rows="3" placeholder="(optional)"></textarea></div>
+        </div>
       </div>
-      <div class="field-group">
-        <label>Cover art image URL</label>
-        <div style="display:flex;gap:12px;align-items:flex-start">
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
-              <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="flex:1;margin-bottom:0" onblur="checkArtUrlDim()"/>
+
+      <div class="field-card">
+        <h4>Artwork</h4>
+        <div class="field-group">
+          <label>Cover art image URL</label>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <input name="art_url" id="art_url_field" placeholder="https://.../cover.jpg (embedded as JPEG)" style="margin-bottom:0" onblur="checkArtUrlDim()"/>
+              <div id="artUrlDims" class="hint" style="margin-top:6px"></div>
             </div>
-            <div id="artUrlDims" class="hint"></div>
-          </div>
-          <div id="artPreview" style="display:none;flex-shrink:0;text-align:center">
-            <img id="artImg" src="" style="max-width:120px;max-height:120px;border-radius:8px;cursor:pointer;display:block" alt="Embedded artwork" onclick="showArtModal(this.src)"/>
-            <div id="artDims" class="hint" style="margin-top:3px;margin-bottom:0"></div>
+            <div id="artPreview" style="display:none;flex-shrink:0;text-align:center">
+              <img id="artImg" src="" style="max-width:120px;max-height:120px;border-radius:10px;cursor:pointer;display:block" alt="Embedded artwork" onclick="showArtModal(this.src)"/>
+              <div id="artDims" class="hint" style="margin-top:3px;margin-bottom:0"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -3049,9 +3116,9 @@ def ui_home():
     </details>
 
     <div class="sticky-actions">
-      <button type="button" class="btn btn-ghost" onclick="revertTags()" title="Reload tags from disk">&#8629; Discard unsaved edits</button>
-      <button class="btn" type="submit" name="action" value="write">&#128190; Write tags</button>
-      <button class="btn btn-ghost" type="submit" name="action" value="archive">&#128230; Write tags + Archive</button>
+      <button type="button" class="btn btn-ghost" onclick="revertTags()" title="Reload tags from disk">Discard unsaved edits</button>
+      <button class="btn" type="submit" name="action" value="write">Write tags</button>
+      <button class="btn btn-ghost" type="submit" name="action" value="archive">Write tags + Archive</button>
     </div>
   </form>
 </div>
@@ -3067,7 +3134,7 @@ def ui_home():
 
 <div id="mbDialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1001;align-items:center;justify-content:center">
   <div style="background:var(--card-bg);border-radius:var(--radius);padding:24px;max-width:520px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.3);max-height:90vh;overflow-y:auto">
-    <h3 style="margin:0 0 14px">&#127925; MusicBrainz Search</h3>
+    <h3 style="margin:0 0 14px">MusicBrainz Search</h3>
     <label>Title</label><input id="mbDlgTitle" placeholder="Track title"/>
     <label>Artist</label><input id="mbDlgArtist" placeholder="Artist name"/>
     <label>Album / Release</label><input id="mbDlgAlbum" placeholder="Album or release (optional)"/>
@@ -3255,6 +3322,27 @@ function isNameTransform(name) {{
   return surname + ", " + given;
 }}
 
+
+function copyYearToDate() {{
+  const year = getField("year").trim();
+  if(/^\d{4}$/.test(year)) setField("date", year);
+}}
+
+function copyDateToYear() {{
+  const dateVal = getField("date").trim();
+  const m = dateVal.match(/(\d{4})/);
+  if(m) setField("year", m[1]);
+}}
+
+function normalizeTrackFormat() {{
+  const raw = getField("track").trim();
+  if(!raw) return;
+  const parts = raw.split("/").map(p => p.trim());
+  const left = parseInt(parts[0] || "", 10);
+  const right = parseInt(parts[1] || "", 10);
+  if(Number.isFinite(left) && Number.isFinite(right)) setField("track", `${{left}}/${{right}}`);
+  else if(Number.isFinite(left)) setField("track", String(left));
+}}
 function applyIsName(fieldName, sortFieldName, cb) {{
   if(!cb.checked) return;
   const el = document.querySelector(`[name="${{fieldName}}"]`);
@@ -3270,12 +3358,12 @@ function renderFileItem(it, idx){{
     : "";
   if(it.type === "dir"){{
     return `<div class="dir-item" data-idx="${{idx}}">
-      <div class="file-thumb-placeholder">&#128193;</div><span>${{esc(it.name)}}</span>
+      <div class="file-thumb-placeholder">DIR</div><span>${{esc(it.name)}}</span>
     </div>`;
   }}
   const thumb = it.has_art
-    ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>&#127925;</div>'">`
-    : `<div class="file-thumb-placeholder">&#127925;</div>`;
+    ? `<img class="file-thumb" src="/api/art?path=${{encodeURIComponent(it.path)}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=file-thumb-placeholder>ART</div>'">`
+    : `<div class="file-thumb-placeholder">ART</div>`;
   return `<div class="file-item${{noGenre ? ' no-genre' : ''}}" data-idx="${{idx}}" data-path="${{esc(it.path)}}">
     <input type="checkbox" class="file-item-select" data-path="${{esc(it.path)}}" title="Select for bulk apply" onclick="event.stopPropagation()"/>
     ${{thumb}}
@@ -3355,7 +3443,7 @@ function clearLookupResults() {{
   document.getElementById("acoustidResults").innerHTML = "";
   document.getElementById("lastfmResults").innerHTML = "";
   document.getElementById("genreSuggestions").innerHTML = "";
-}
+}}
 
 function upDir(){{
   const d = document.getElementById("dir").value.trim();
@@ -3789,7 +3877,7 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
     const res = await fetch("/update", {{method:"POST", body:fd}});
     const data = await res.json();
     if(data.status === "ok") {{
-      let html = `<div style="color:#065f46;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x2705; Tags written successfully</div>`;
+      let html = `<div style="color:#065f46;font-size:1.1rem;font-weight:700;margin-bottom:12px">Tags written successfully</div>`;
       html += `<div><strong>Wrote to:</strong><br><span class="mono">${{esc(data.wrote_to)}}</span></div>`;
       if(data.archived_to) {{
         html += `<div style="margin-top:10px"><strong>Archived to:</strong><br><span class="mono">${{esc(data.archived_to)}}</span></div>`;
@@ -3821,11 +3909,11 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
         }}
       }}
     }} else {{
-      showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">&#x274C; Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
+      showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
       showToast(data.error || "Save failed", "error");
     }}
   }} catch(err) {{
-    showModal(`<div style="color:#991b1b">&#x274C; Network error: ${{esc(err.message)}}</div>`);
+    showModal(`<div style="color:#991b1b">Network error: ${{esc(err.message)}}</div>`);
     showToast("Network error while saving.", "error");
   }}
 }});
