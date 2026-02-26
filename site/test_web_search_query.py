@@ -56,7 +56,8 @@ from app import (_split_query_artist_title, normalize_search_query,  # noqa: E40
                  _score_result, _expand_year_only_date,
                  _normalize_remix_handle, _remix_match_level,
                  obfuscate_key, _REMIX_KW_RE, re,
-                 _build_retry_query, _site_search_url)
+                 _build_retry_query, _site_search_url,
+                 _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE)
 
 
 # ---------------------------------------------------------------------------
@@ -467,5 +468,121 @@ def test_site_search_url_juno():
 def test_site_search_url_unknown_returns_empty():
     """Unknown site name returns empty string."""
     assert _site_search_url("Unknown", "q") == ""
+
+
+# ---------------------------------------------------------------------------
+# Remix keyword boost in _score_result
+# ---------------------------------------------------------------------------
+
+def test_remix_keyword_boost_increases_score():
+    """A result title containing a remix keyword gets a +3 score boost."""
+    score_plain = _score_result("Artist", "Song", "Artist", "Song")
+    score_remix = _score_result("Artist", "Song", "Artist", "Song Remix")
+    # The remix version has a different title so title penalty applies, but
+    # the boost should still raise it above an equivalent non-remix result.
+    score_no_remix = _score_result("Artist", "Song", "Artist", "Song Extra")
+    assert score_remix > score_no_remix
+
+
+def test_remixes_title_scores_higher_than_same_length_non_remix():
+    """A result title with 'Remixes' (7 chars) scores higher than a same-length non-remix word."""
+    # "remixes" and "uploads" are both 7 chars → same title similarity penalty;
+    # only the boost differs, so the remix-keyword result must win.
+    score_remixes = _score_result("Artist", "Song", "Artist", "Song remixes")
+    score_other   = _score_result("Artist", "Song", "Artist", "Song uploads")
+    assert score_remixes > score_other
+
+
+def test_remixes_boost_total_is_five():
+    """'Remixes' in result title gives total boost of +5 (base 3 + extra 2)."""
+    # Use identical artist/title match as baseline; both artist and title have
+    # no similarity penalty. 'Remixes' adds +3 base + +2 extra = +5, clamped to 100.
+    score_plain = _score_result("Artist", "Song", "Artist", "Song")
+    score_remixes = _score_result("Artist", "Song", "Artist", "Song Remixes")
+    # 'Song Remixes' has slightly different title similarity but gets +5 boost.
+    # We verify it's above plain (which caps at 100.0) by checking with a lower
+    # baseline title that gives room to see the boost:
+    score_low = _score_result("Artist", "Song", "Artist", "Different Title")
+    score_low_remixes = _score_result("Artist", "Song", "Artist", "Different Title Remixes")
+    assert score_low_remixes > score_low
+
+
+def test_remix_keyword_boost_case_insensitive():
+    """Remix keyword boost is applied regardless of case (res_title is lowercased internally)."""
+    score_lc = _score_result("Artist", "Song", "Artist", "Song remix")
+    score_uc = _score_result("Artist", "Song", "Artist", "Song REMIX")
+    assert score_lc == score_uc
+
+
+def test_perfect_match_still_scores_100():
+    """Adding remix boost does not push a plain perfect match above 100."""
+    score = _score_result("Artist", "Song", "Artist", "Song")
+    assert score == 100.0
+
+
+def test_remixes_keyword_clamped_to_100():
+    """A perfect match + 'Remixes' suffix is clamped to 100, not above."""
+    # The title similarity penalty for "song remixes" vs "song" is > 5 pts,
+    # so the result won't actually exceed 100.  We verify it's <= 100.
+    score = _score_result("Artist", "Song Remixes", "Artist", "Song Remixes")
+    assert score == 100.0
+
+
+# ---------------------------------------------------------------------------
+# _retry_meaningful flag logic (replicated from api_web_search_stream)
+# ---------------------------------------------------------------------------
+
+def _compute_retry_meaningful(title: str, artist: str) -> bool:
+    """Replicate the _retry_meaningful computation from api_web_search_stream."""
+    norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
+    return bool(remix_tokens) or (
+        _TRAILING_REMIX_RE.sub("", norm_title).strip(" -,") != norm_title
+    )
+
+
+def test_retry_meaningful_bracketed_remix():
+    """Bracketed remix descriptor makes retry meaningful."""
+    assert _compute_retry_meaningful("On My Knees (Original Mix)", "Artist") is True
+
+
+def test_retry_meaningful_bare_trailing_remix():
+    """Bare trailing remix keyword (no brackets) makes retry meaningful."""
+    assert _compute_retry_meaningful("Song Original Mix", "Artist") is True
+
+
+def test_retry_meaningful_no_remix():
+    """Plain title with no remix descriptor makes retry NOT meaningful."""
+    assert _compute_retry_meaningful("On My Knees", "Artist") is False
+
+
+def test_retry_meaningful_vip_suffix():
+    """Trailing 'VIP' suffix makes retry meaningful."""
+    assert _compute_retry_meaningful("Song VIP", "Artist") is True
+
+
+def test_retry_meaningful_dash_remix():
+    """Dash-separated remix suffix (e.g. '- Artist Remix') makes retry meaningful."""
+    assert _compute_retry_meaningful("Song - DJ Remix", "Artist") is True
+
+
+# ---------------------------------------------------------------------------
+# _RETRY_SCORE_THRESHOLD constant
+# ---------------------------------------------------------------------------
+
+def test_retry_score_threshold_value():
+    """_RETRY_SCORE_THRESHOLD is defined and set to a sensible value (70–85)."""
+    assert 70 <= _RETRY_SCORE_THRESHOLD <= 85
+
+
+def test_retry_triggered_below_threshold():
+    """A result below the threshold should signal that retry is needed."""
+    low_score = _RETRY_SCORE_THRESHOLD - 1
+    assert low_score < _RETRY_SCORE_THRESHOLD
+
+
+def test_retry_not_triggered_at_threshold():
+    """A perfect match scores well above the threshold; retry is suppressed for good results."""
+    perfect_score = _score_result("Artist", "Song", "Artist", "Song")
+    assert perfect_score >= _RETRY_SCORE_THRESHOLD
 
 

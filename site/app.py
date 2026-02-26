@@ -54,6 +54,10 @@ WEB_SEARCH_DEBUG = os.getenv("WEB_SEARCH_DEBUG", "").strip() == "1"
 HEADLESS_ENABLED = os.getenv("HEADLESS_ENABLED", "1").strip() not in ("0", "false", "no")
 HEADLESS_TIMEOUT_SECS = int(os.getenv("HEADLESS_TIMEOUT_SECS", "15"))
 HEADLESS_MAX_RESULTS = int(os.getenv("HEADLESS_MAX_RESULTS", "10"))
+# Minimum score (0–100) that any non-fallback first-pass result must reach to
+# suppress the remix-retry search.  When all structured results score below this
+# threshold the retry is triggered even if structured results exist.
+_RETRY_SCORE_THRESHOLD = 78
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
 
@@ -345,6 +349,16 @@ def _score_result(artist_q: str, title_q: str, res_artist: str, res_title: str,
             score -= 8
         elif level == 1:
             score -= 4
+
+    # Remix keyword boost: small additive reward for results whose title
+    # contains remix-related terms.  "Remixes" gets an extra bump to help
+    # compilation pages surface reliably in retry searches.
+    if res_title:
+        _has_remixes = bool(re.search(r'\bremixes\b', res_title))
+        if _REMIX_KW_RE.search(res_title) or _has_remixes:
+            score += 3
+        if _has_remixes:
+            score += 2
 
     return round(min(100.0, max(0.0, score)), 1)
 
@@ -1940,6 +1954,12 @@ def api_web_search_stream():
 
     norm_q_out = norm_q.lower()
     retry_q_out = _build_retry_query(norm_artist, norm_title)
+    # Retry is meaningful when the original query included a remix descriptor
+    # (bracketed token or bare trailing keyword), so searching without it
+    # casts a broader net and may surface compilation/release pages.
+    _retry_meaningful = bool(remix_tokens) or (
+        _TRAILING_REMIX_RE.sub("", norm_title).strip(" -,") != norm_title
+    )
 
     def generate():
         if not q:
@@ -2010,9 +2030,13 @@ def api_web_search_stream():
                             yield sse_event("log", f"{site_name} headless: no structured results found")
                     except Exception as _hl_exc:
                         yield sse_event("log", f"{site_name} headless: failed \u2014 {str(_hl_exc)[:120]}")
-                # Per-site remix-retry: if both normal and headless found no structured
-                # results, retry with remix descriptors stripped from the query.
-                if not any(not x.get("is_fallback") for x in found) and retry_q_out and retry_q_out != norm_q_out:
+                # Per-site remix-retry: trigger when first pass has no good matches
+                # (no structured results, or best score below threshold).
+                _non_fb_first = [x for x in found if not x.get("is_fallback")]
+                _first_best = max((x.get("score", 0) for x in _non_fb_first), default=0)
+                if _retry_meaningful:
+                    yield sse_event("log", f"{site_name}: pass 1 q={norm_q_out!r} \u2014 {len(_non_fb_first)} result(s), best score {_first_best}")
+                if _retry_meaningful and retry_q_out and retry_q_out != norm_q_out and _first_best < _RETRY_SCORE_THRESHOLD:
                     _retry_qq = requests.utils.quote(retry_q_out, safe="")
                     _retry_url = _site_search_url(site_name, _retry_qq)
                     if _retry_url:
@@ -2024,9 +2048,13 @@ def api_web_search_stream():
                                 norm_artist, norm_title, year, date, remix_tokens,
                             )
                             _retry_non_fb = [x for x in _retry_found if not x.get("is_fallback")]
+                            _retry_best = max((x.get("score", 0) for x in _retry_non_fb), default=0)
+                            yield sse_event("log", f"{site_name}: pass 2 q={retry_q_out!r} \u2014 {len(_retry_non_fb)} result(s), best score {_retry_best}")
                             if _retry_non_fb:
                                 found = _retry_found
-                                yield sse_event("log", f"{site_name}: retry found {len(_retry_non_fb)} result(s)")
+                                yield sse_event("log", f"{site_name}: retry replaced first-pass results")
+                            else:
+                                yield sse_event("log", f"{site_name}: retry found no structured results \u2014 keeping first-pass")
                         except Exception as _retry_exc:
                             yield sse_event("log", f"{site_name}: retry failed \u2014 {str(_retry_exc)[:80]}")
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
@@ -2110,9 +2138,13 @@ def api_web_search_stream():
                         yield sse_event("log", "Bandcamp headless: no structured results found")
                 except Exception as _bc_hl_exc:
                     yield sse_event("log", f"Bandcamp headless: failed \u2014 {str(_bc_hl_exc)[:120]}")
-            # Per-site remix-retry for Bandcamp: if both normal and headless found no
-            # structured results, retry with remix descriptors stripped from the query.
-            if not any(not x.get("is_fallback") for x in found) and retry_q_out and retry_q_out != norm_q_out:
+            # Per-site remix-retry for Bandcamp: trigger when first pass has no good
+            # matches (no structured results, or best score below threshold).
+            _bc_non_fb_first = [x for x in found if not x.get("is_fallback")]
+            _bc_first_best = max((x.get("score", 0) for x in _bc_non_fb_first), default=0)
+            if _retry_meaningful:
+                yield sse_event("log", f"Bandcamp: pass 1 q={norm_q_out!r} \u2014 {len(_bc_non_fb_first)} result(s), best score {_bc_first_best}")
+            if _retry_meaningful and retry_q_out and retry_q_out != norm_q_out and _bc_first_best < _RETRY_SCORE_THRESHOLD:
                 _bc_retry_qq = requests.utils.quote(retry_q_out, safe="")
                 _bc_retry_url = f"https://bandcamp.com/search?q={_bc_retry_qq}&item_type=t"
                 yield sse_event("log", f"Bandcamp: retrying without remix \u2014 {norm_q_out!r} \u2192 {retry_q_out!r}")
@@ -2127,9 +2159,13 @@ def api_web_search_stream():
                     for msg in _bc_retry_debug:
                         yield sse_event("log", f"Bandcamp retry: {msg}")
                     _bc_retry_non_fb = [x for x in _bc_retry_found if not x.get("is_fallback")]
+                    _bc_retry_best = max((x.get("score", 0) for x in _bc_retry_non_fb), default=0)
+                    yield sse_event("log", f"Bandcamp: pass 2 q={retry_q_out!r} \u2014 {len(_bc_retry_non_fb)} result(s), best score {_bc_retry_best}")
                     if _bc_retry_non_fb:
                         found = _bc_retry_found
-                        yield sse_event("log", f"Bandcamp: retry found {len(_bc_retry_non_fb)} result(s)")
+                        yield sse_event("log", f"Bandcamp: retry replaced first-pass results")
+                    else:
+                        yield sse_event("log", f"Bandcamp: retry found no structured results \u2014 keeping first-pass")
                 except Exception as _bc_retry_exc:
                     yield sse_event("log", f"Bandcamp: retry failed \u2014 {str(_bc_retry_exc)[:80]}")
             yield sse_event("log", f"Bandcamp: {len(found)} result(s)")
