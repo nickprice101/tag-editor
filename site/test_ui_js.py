@@ -21,11 +21,11 @@ import tempfile
 APP_PY = os.path.join(os.path.dirname(__file__), "app.py")
 
 
-def extract_script_block(source: str) -> str:
-    """Extract the first <script>...</script> block from the f-string template."""
-    m = re.search(r"<script>\n(.*?)\n</script>", source, re.DOTALL)
-    assert m, "<script> block not found in ui_home() template"
-    return m.group(1)
+def extract_script_blocks(source: str) -> list[str]:
+    """Extract all <script>...</script> blocks from app.py templates."""
+    blocks = re.findall(r"<script>\n(.*?)\n</script>", source, re.DOTALL)
+    assert blocks, "No <script> blocks found in app.py templates"
+    return blocks
 
 
 def minimal_fstring_to_js(raw: str) -> str:
@@ -71,18 +71,18 @@ def validate_js_syntax(js: str) -> None:
         os.unlink(tmp_path)
 
 
-def test_ui_home_js_no_syntax_errors():
+def test_app_inline_js_has_no_syntax_errors():
     with open(APP_PY, "r") as f:
         source = f.read()
-    js_raw = extract_script_block(source)
-    js = minimal_fstring_to_js(js_raw)
-    validate_js_syntax(js)
-    print("OK: ui_home() JavaScript has no syntax errors.")
+    for js_raw in extract_script_blocks(source):
+        js = minimal_fstring_to_js(js_raw)
+        validate_js_syntax(js)
+    print("OK: app.py inline JavaScript has no syntax errors.")
 
 
 if __name__ == "__main__":
     try:
-        test_ui_home_js_no_syntax_errors()
+        test_app_inline_js_has_no_syntax_errors()
         sys.exit(0)
     except AssertionError as e:
         print(f"FAIL: {e}", file=sys.stderr)
