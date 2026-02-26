@@ -3564,7 +3564,7 @@ async function loadFileByPath(p){{
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Loading: ${{fn}}\u2026`;
-  const loaded = await loadTags(seq);
+  const loaded = await loadTags(p, seq);
   if(!loaded) return;
   showToast(`Loaded ${{fn}}`, "info", 1400);
   // Load audio player
@@ -3625,8 +3625,15 @@ const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_rele
   "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
   "barcode","asin"];
 
-async function loadTags(seq = 0){{
-  const p = document.getElementById("path").value.trim();
+async function loadTags(pathOrSeq = "", seq = 0){{
+  // Backward compatibility: loadTags(seq) and loadTags(path, seq) are both supported.
+  let p = "";
+  if(typeof pathOrSeq === "number"){{
+    seq = pathOrSeq;
+    p = document.getElementById("path").value.trim();
+  }} else {{
+    p = (pathOrSeq || "").trim() || document.getElementById("path").value.trim();
+  }}
   const msg = document.getElementById("loadMsg");
   if(!p){{ msg.textContent = "No file selected. Double-click a file in Browse or Search to load."; return false; }}
   clearLookupResults();
@@ -3641,8 +3648,8 @@ async function loadTags(seq = 0){{
     logClickDebug("loadTags", "fetch failed", {{ path: p, error: String(err || "unknown") }});
     return false;
   }}
-  if(seq && seq !== _activeLoad.seq) {{
-    logClickDebug("loadTags", "Ignored stale response", {{ path: p, seq, activeSeq: _activeLoad.seq }});
+  if(seq && seq !== _activeLoad.seq && p !== _activeLoad.path) {{
+    logClickDebug("loadTags", "Ignored stale response", {{ path: p, seq, activeSeq: _activeLoad.seq, activePath: _activeLoad.path }});
     return false;
   }}
   if(!res.ok){{ msg.textContent = data.error || "Error"; return false; }}
@@ -4006,7 +4013,7 @@ function logClickDebug(source, msg, extra = null) {{
 
 document.getElementById("wsq").addEventListener("input", function(){{ _wsqAutoValue = ""; }});
 
-function requestLoadFile(path, opts = {{}}) {{
+async function requestLoadFile(path, opts = {{}}) {{
   if(!path) return;
   const force = !!opts.force;
   const reason = opts.reason || "";
@@ -4016,67 +4023,48 @@ function requestLoadFile(path, opts = {{}}) {{
     return;
   }}
   _lastLoadRequest = {{ path, ts: now }};
+  // Keep list selection/path state in sync before loading so a dblclick always
+  // updates the right panel from the exact item the user activated.
+  openFile(path);
   logClickDebug("requestLoadFile", "Loading file", {{ path, reason, force }});
-  loadFileByPath(path);
+  try {{
+    await loadFileByPath(path);
+  }} catch(err) {{
+    logClickDebug("requestLoadFile", "Load failed", {{ path, reason, error: String(err || "unknown") }});
+  }}
 }}
 
 document.getElementById("dirList").addEventListener("click", function(e){{
-  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
-  const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _dirItems[parseInt(item.dataset.idx, 10)];
-  if(!it) return;
-  logClickDebug("dirList", "click", {{ detail: e.detail, type: it.type, path: it.path }});
-  if(it.type === "dir") openDir(it.path);
-  else {{
-    const wasSelected = item.classList.contains("selected");
-    openFile(it.path);
-    // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-    if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
-  }}
+  // Single click is intentionally inert for browse/search items.
+  if(e.target.closest(".file-item-select")) updateBulkCount();
 }});
 document.getElementById("dirList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(item){{
-    const idx = parseInt(item.dataset.idx, 10);
-    const it = _dirItems[idx];
-    logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
-    if(it && it.type !== "dir" && it.path){{
-      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
-      return;
-    }}
+  if(!item) return;
+  const idx = parseInt(item.dataset.idx, 10);
+  const it = _dirItems[idx];
+  logClickDebug("dirList", "dblclick", {{ idx, type: it?.type || null, path: it?.path || null }});
+  if(!it || !it.path) return;
+  if(it.type === "dir") {{
+    openDir(it.path);
+    return;
   }}
-  const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
+  void requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("sList").addEventListener("click", function(e){{
-  if(e.target.closest(".file-item-select")) {{ updateBulkCount(); return; }}
-  const item = e.target.closest("[data-idx]");
-  if(!item) return;
-  const it = _searchItems[parseInt(item.dataset.idx, 10)];
-  if(!it) return;
-  logClickDebug("sList", "click", {{ detail: e.detail, path: it.path }});
-  const wasSelected = item.classList.contains("selected");
-  openFile(it.path);
-  // Trigger load for true browser double-clicks and for repeated clicks on the already-selected item.
-  if(e.detail >= 2 || wasSelected) requestLoadFile(it.path, {{ reason: e.detail >= 2 ? "click-detail-2" : "click-on-selected" }});
+  // Single click is intentionally inert for browse/search items.
+  if(e.target.closest(".file-item-select")) updateBulkCount();
 }});
 document.getElementById("sList").addEventListener("dblclick", function(e){{
   if(e.target.closest(".file-item-select")) return;
   const item = e.target.closest("[data-idx]");
-  if(item){{
-    const idx = parseInt(item.dataset.idx, 10);
-    const it = _searchItems[idx];
-    logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
-    if(it && it.path){{
-      requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
-      return;
-    }}
-  }}
-  const selectedPath = document.getElementById("path").value.trim();
-  if(selectedPath) requestLoadFile(selectedPath, {{ force: true, reason: "dblclick-fallback" }});
+  if(!item) return;
+  const idx = parseInt(item.dataset.idx, 10);
+  const it = _searchItems[idx];
+  logClickDebug("sList", "dblclick", {{ idx, path: it?.path || null }});
+  if(it && it.path) void requestLoadFile(it.path, {{ force: true, reason: "dblclick-item" }});
 }});
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
