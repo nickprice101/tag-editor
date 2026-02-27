@@ -79,10 +79,6 @@ MB_TXXX_FIELDS = [
     "musicbrainz_releasegroupid",
     "musicbrainz_artistid",
     "musicbrainz_albumartistid",
-    "musicbrainz_releasetrackid",
-    "musicbrainz_workid",
-    "musicbrainz_trmid",
-    "musicbrainz_discid",
     "musicbrainz_releasecountry",
     "musicbrainz_releasestatus",
     "musicbrainz_releasetype",
@@ -92,7 +88,6 @@ MB_TXXX_FIELDS = [
     "musicbrainz_artist",
     "musicbrainz_album",
     "barcode",
-    "asin",
 ]
 
 # Lightweight tag cache: (path, mtime) -> dict (max 2000 entries)
@@ -1302,7 +1297,6 @@ def api_mb_recording():
     release_status = ""
     release_type = ""
     barcode = ""
-    asin = ""
 
     if releases:
         rel = releases[0]
@@ -1311,7 +1305,6 @@ def api_mb_recording():
         release_country = rel.get("country", "") or ""
         release_status = (rel.get("status") or "").lower()
         barcode = rel.get("barcode", "") or ""
-        asin = rel.get("asin", "") or ""
         rg = rel.get("release-group", {}) or {}
         release_group_id = rg.get("id", "") or ""
         release_type = (rg.get("primary-type") or "").lower()
@@ -1341,7 +1334,6 @@ def api_mb_recording():
         "musicbrainz_artist": artist,
         "musicbrainz_album": album,
         "barcode": barcode,
-        "asin": asin,
     }
     return jsonify({"fields": {k: v for k, v in fields.items() if v}})
 
@@ -3320,10 +3312,6 @@ def ui_home():
           <div class="field-group"><label>MusicBrainz Release Group ID</label><input name="musicbrainz_releasegroupid" class="mono" placeholder="UUID"/></div>
           <div class="field-group"><label>MusicBrainz Artist ID</label><input name="musicbrainz_artistid" class="mono" placeholder="UUID"/></div>
           <div class="field-group"><label>MusicBrainz Album Artist ID</label><input name="musicbrainz_albumartistid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Release Track ID</label><input name="musicbrainz_releasetrackid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Work ID</label><input name="musicbrainz_workid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz TRMID (legacy)</label><input name="musicbrainz_trmid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Disc ID</label><input name="musicbrainz_discid" class="mono" placeholder="disc id"/></div>
         </div>
         <div>
           <div class="field-group"><label>MusicBrainz Release Country</label><input name="musicbrainz_releasecountry" placeholder="e.g. GB"/></div>
@@ -3335,7 +3323,6 @@ def ui_home():
           <div class="field-group"><label>MusicBrainz Artist</label><input name="musicbrainz_artist"/></div>
           <div class="field-group"><label>MusicBrainz Album</label><input name="musicbrainz_album"/></div>
           <div class="field-group"><label>Barcode</label><input name="barcode" placeholder="EAN/UPC"/></div>
-          <div class="field-group"><label>ASIN</label><input name="asin" placeholder="Amazon ASIN"/></div>
         </div>
       </div>
     </details>
@@ -3768,11 +3755,10 @@ async function doSearch(){{
 }}
 
 const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_releasegroupid",
-  "musicbrainz_artistid","musicbrainz_albumartistid","musicbrainz_releasetrackid",
-  "musicbrainz_workid","musicbrainz_trmid","musicbrainz_discid","musicbrainz_releasecountry",
+  "musicbrainz_artistid","musicbrainz_albumartistid","musicbrainz_releasecountry",
   "musicbrainz_releasestatus","musicbrainz_releasetype","musicbrainz_albumtype",
   "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
-  "barcode","asin"];
+  "barcode"];
 
 const TAG_FIELDS = ["title","artist","album","albumartist","involved_people_list","date","genre",
   "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
