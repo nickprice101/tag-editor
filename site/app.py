@@ -9,7 +9,7 @@ from datetime import date as dt_date, datetime as dt_datetime
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote
 
 import requests
 import acoustid
@@ -100,6 +100,15 @@ _tag_cache: dict = {}
 _TAG_CACHE_MAX = 2000
 
 app = Flask(__name__)
+
+_TAB_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>
+<rect width='64' height='64' rx='14' fill='%23FF1A55'/>
+<path d='M18 18h28v9H18zm0 14h28v14H18z' fill='white' opacity='.95'/>
+<circle cx='24' cy='39' r='3.4' fill='%23FF1A55'/>
+<circle cx='32' cy='39' r='3.4' fill='%23FF1A55'/>
+<circle cx='40' cy='39' r='3.4' fill='%23FF1A55'/>
+</svg>"""
+_TAB_ICON_DATA_URL = "data:image/svg+xml," + quote(_TAB_ICON_SVG)
 
 # ---------------- Auth ----------------
 def basic_auth_ok() -> bool:
@@ -2101,15 +2110,18 @@ def api_web_search_stream():
     date = (request.args.get("date") or "").strip()
     q_raw = (request.args.get("q") or "").strip()
 
-    # If q was explicitly provided, it is the source of truth for the search.
-    # Parse it as "Artist – Title" for scoring; otherwise fall back to the
-    # individual artist/title form fields.
+    # If q was explicitly provided, it is the source of truth for the outgoing
+    # search query URL.  For scoring, prefer explicit artist/title form fields
+    # when available (they are typically cleaner than a free-form q string).
     if q_raw:
         q = q_raw
-        q_artist, q_title = _split_query_artist_title(q_raw)
-        norm_title, norm_artist, remix_tokens = normalize_search_query(
-            q_title or q_raw, q_artist
-        )
+        if artist or title:
+            norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
+        else:
+            q_artist, q_title = _split_query_artist_title(q_raw)
+            norm_title, norm_artist, remix_tokens = normalize_search_query(
+                q_title or q_raw, q_artist
+            )
     else:
         q = f"{artist} {title}".strip()
         norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
@@ -2241,6 +2253,9 @@ def api_web_search_stream():
                 if site_name == "Juno" and deduped and max((x.get("score", 0) for x in deduped), default=0) <= 0:
                     deduped = []
                     yield sse_event("log", "Juno: structured matches scored 0; returning search-page link instead")
+                found = _drop_zero_score_structured(found, site_name, search_url)
+                non_fb = [x for x in found if not x.get("is_fallback")]
+                deduped = _deduplicate_by_url(non_fb)
                 results_by_source[site_name] = (
                     sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
                     if deduped else found[:1]
@@ -2448,6 +2463,23 @@ def _deduplicate_by_url(results: list) -> list:
                 order[idx] = by_url[u]
                 break
     return order
+
+
+def _drop_zero_score_structured(results: list, site_name: str, search_url: str) -> list:
+    """Drop structured results with zero score; keep fallback when nothing useful remains."""
+    kept = [x for x in results if x.get("is_fallback") or x.get("score", 0) > 0]
+    if kept:
+        return kept
+    return [{
+        "source": site_name,
+        "title": f"View search results on {site_name}",
+        "artist": "",
+        "url": search_url,
+        "score": 0.0,
+        "note": "No non-zero matches extracted; open manually.",
+        "direct_url": False,
+        "is_fallback": True,
+    }]
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -2840,6 +2872,7 @@ def ui_home():
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>MP3 Tag Editor</title>
+  <link rel="icon" type="image/svg+xml" href="{_TAB_ICON_DATA_URL}"/>
   <style>
     :root {{
       --accent: #FF1A55;
