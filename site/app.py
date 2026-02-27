@@ -574,13 +574,29 @@ def http_get(url: str, **kwargs):
     return requests.get(url, headers=headers, **kwargs)
 
 def bandcamp_get(url: str, **kwargs):
-    """GET helper for Bandcamp that sends browser-like headers to avoid 403s."""
+    """GET helper for Bandcamp that sends browser-like headers to avoid 403s.
+
+    This intentionally mirrors a normal top-level browser navigation request so
+    Bandcamp receives familiar fetch metadata during the first pass.
+    """
     headers = kwargs.pop("headers", {})
     headers.setdefault("User-Agent", BANDCAMP_UA)
     headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    headers.setdefault("Accept-Encoding", "gzip, deflate, br")
     headers.setdefault("Accept-Language", "en-US,en;q=0.9")
     headers.setdefault("Referer", "https://bandcamp.com/")
+    headers.setdefault("Origin", "https://bandcamp.com")
+    headers.setdefault("DNT", "1")
+    headers.setdefault("Upgrade-Insecure-Requests", "1")
+    headers.setdefault("Sec-Fetch-Dest", "document")
+    headers.setdefault("Sec-Fetch-Mode", "navigate")
+    headers.setdefault("Sec-Fetch-Site", "same-origin")
+    headers.setdefault("Sec-Fetch-User", "?1")
+    headers.setdefault("sec-ch-ua", '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"')
+    headers.setdefault("sec-ch-ua-mobile", "?0")
+    headers.setdefault("sec-ch-ua-platform", '"Windows"')
     headers.setdefault("Cache-Control", "no-cache")
+    headers.setdefault("Pragma", "no-cache")
     return requests.get(url, headers=headers, **kwargs)
 
 def _headless_get_html(url: str, timeout_secs: int = None, *, _browser=None) -> str:
