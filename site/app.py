@@ -1748,6 +1748,15 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     m_tn = re.search(r"track_number\s*:\s*'(\d+)'", onclick)
                     if m_tn:
                         track_number = m_tn.group(1)
+                # Additional fallback: cart/button onclick often contains
+                # addToCart(title_id, product_id, track_number)
+                if track_number is None:
+                    atc_btn = item.find("button", class_=re.compile(r"btn-widget-atc"))
+                    if atc_btn:
+                        onclick = atc_btn.get("onclick", "") or ""
+                        m_atc = re.search(r"addToCart\(\s*\d+\s*,\s*\d+\s*,\s*(\d+)\s*\)", onclick)
+                        if m_atc:
+                            track_number = m_atc.group(1)
                 if t and raw_href:
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                             _compilation_penalty(a)
@@ -2229,6 +2238,9 @@ def api_web_search_stream():
                 non_fb = [x for x in found if not x.get("is_fallback")]
                 # De-duplicate within source by URL
                 deduped = _deduplicate_by_url(non_fb)
+                if site_name == "Juno" and deduped and max((x.get("score", 0) for x in deduped), default=0) <= 0:
+                    deduped = []
+                    yield sse_event("log", "Juno: structured matches scored 0; returning search-page link instead")
                 results_by_source[site_name] = (
                     sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
                     if deduped else found[:1]
@@ -2392,17 +2404,50 @@ def _truncate_results_by_source(rbs: dict) -> dict:
     """Truncate long string fields in a results_by_source dict before JSON encoding."""
     return {source: _truncate_result_fields(results) for source, results in rbs.items()}
 
+def _merge_result_entries(base: dict, candidate: dict) -> dict:
+    """Merge two same-URL result dicts, preserving richer metadata.
+
+    Preference rules:
+      - Keep the higher score.
+      - Prefer direct URLs over non-direct/fallback variants.
+      - Fill empty fields from the candidate (track_number, bpm, genre, etc.).
+    """
+    merged = dict(base)
+    if candidate.get("score", 0) > merged.get("score", 0):
+        merged["score"] = candidate.get("score", 0)
+    if candidate.get("direct_url") and not merged.get("direct_url"):
+        merged["direct_url"] = True
+    if not candidate.get("is_fallback"):
+        merged["is_fallback"] = False
+    for k, v in candidate.items():
+        if k in ("score", "direct_url", "is_fallback"):
+            continue
+        if v in (None, ""):
+            continue
+        if merged.get(k) in (None, ""):
+            merged[k] = v
+    return merged
+
+
 def _deduplicate_by_url(results: list) -> list:
-    """Return results with duplicates (same URL) removed, preserving order."""
-    seen: set = set()
-    deduped = []
+    """Return results with duplicate URLs merged, preserving first-seen order."""
+    by_url: dict = {}
+    order = []
     for x in results:
         u = x.get("url", "")
-        if u and u in seen:
+        if not u:
+            order.append(x)
             continue
-        seen.add(u)
-        deduped.append(x)
-    return deduped
+        if u not in by_url:
+            by_url[u] = dict(x)
+            order.append(by_url[u])
+            continue
+        by_url[u] = _merge_result_entries(by_url[u], x)
+        for idx, item in enumerate(order):
+            if isinstance(item, dict) and item.get("url") == u:
+                order[idx] = by_url[u]
+                break
+    return order
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -3988,12 +4033,12 @@ function webSearch(){{
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
-            ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
+            ${{(r.track_number||r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.track_number ? 'Track #: '+esc(String(r.track_number)) : '', r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
               ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy art URL to clipboard">&#128203; Art URL</button>` : ""}}
-              ${{confidenceBadge(r.score)}}
+              ${{!r.is_fallback ? confidenceBadge(r.score) : ""}}
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
           </div>`;
@@ -4015,6 +4060,7 @@ async function applyWebResult(i){{
   // Prefill BPM and genre from search result if those fields are currently blank
   if(r.bpm && !getField("bpm")) setField("bpm", String(r.bpm));
   if(r.genre && !getField("genre")) setField("genre", r.genre);
+  if(r.track_number && !getField("track")) setField("track", String(r.track_number));
   document.getElementById("purl").value = r.url;
   parseUrl();
 }}
@@ -4136,7 +4182,7 @@ function resetRightPaneSearchState() {{
     const el = document.getElementById(id);
     if(el) el.innerHTML = "";
   }}
-}
+}}
 
 function trackListClick(listName, idx, item) {{
   if(!item) return;
