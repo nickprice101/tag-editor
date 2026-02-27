@@ -59,7 +59,7 @@ from app import (_split_query_artist_title, normalize_search_query,  # noqa: E40
                  _build_retry_query, _site_search_url,
                  _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE,
                  _should_retry_without_remix, _RETRY_SUFFICIENT_HITS,
-                 _juno_thumb_to_full)
+                 _juno_thumb_to_full, _drop_zero_score_structured)
 
 
 # ---------------------------------------------------------------------------
@@ -618,3 +618,40 @@ def test_retry_not_triggered_at_threshold():
     assert perfect_score >= _RETRY_SCORE_THRESHOLD
 
 
+
+
+def test_q_uses_field_values_for_scoring_when_available():
+    """When q is free-form but fields exist, scoring terms should come from fields."""
+    q_raw = "24hour experience deeper"
+    artist = "24 Hour Experience"
+    title = "Deeper"
+
+    # Mirrors api_web_search_stream scoring-term selection logic
+    norm_title, norm_artist, _ = normalize_search_query(title, artist)
+
+    assert norm_artist == "24 Hour Experience"
+    assert norm_title == "Deeper"
+    assert q_raw != f"{norm_artist} {norm_title}".strip()
+
+
+def test_drop_zero_score_structured_replaces_with_fallback():
+    filtered = _drop_zero_score_structured([
+        {"source": "Juno", "title": "Irrelevant", "artist": "Various", "url": "https://x", "score": 0.0,
+         "direct_url": True, "is_fallback": False},
+    ], "Juno", "https://www.junodownload.com/search/?q=test")
+
+    assert len(filtered) == 1
+    assert filtered[0]["is_fallback"] is True
+    assert filtered[0]["score"] == 0.0
+
+
+def test_drop_zero_score_structured_keeps_positive_hits():
+    filtered = _drop_zero_score_structured([
+        {"source": "Juno", "title": "Match", "artist": "Artist", "url": "https://x", "score": 72.3,
+         "direct_url": True, "is_fallback": False},
+        {"source": "Juno", "title": "Miss", "artist": "Various", "url": "https://y", "score": 0.0,
+         "direct_url": True, "is_fallback": False},
+    ], "Juno", "https://www.junodownload.com/search/?q=test")
+
+    assert len(filtered) == 1
+    assert filtered[0]["title"] == "Match"
