@@ -4112,8 +4112,31 @@ function handleListItemActivation(listName, item) {{
     openDir(item.path);
     return;
   }}
+  resetRightPaneSearchState();
   requestLoadFile(item.path, {{ force: true, reason: `${{listName}}-activate` }});
 }}
+
+function resetRightPaneSearchState() {{
+  for (const [id, es] of Object.entries(_streams)) {{
+    try {{ es.close(); }} catch (_) {{}}
+    delete _streams[id];
+  }}
+  const statusIds = ["webSearchStatus", "acoustidStatus", "discogsStatus", "mbSearchStatus"];
+  for (const id of statusIds) {{
+    const el = document.getElementById(id);
+    if(!el) continue;
+    el.className = "stream-status";
+    el.innerHTML = "";
+  }}
+  const resultIds = [
+    "webSearchResults", "mbResults", "mbDlgResults", "acoustidResults",
+    "discogsResults", "discogsTracklist", "parseResults", "acoustidMbStatus", "mbDlgStatus"
+  ];
+  for (const id of resultIds) {{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = "";
+  }}
+}
 
 function trackListClick(listName, idx, item) {{
   if(!item) return;
