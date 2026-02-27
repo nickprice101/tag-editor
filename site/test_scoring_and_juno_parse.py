@@ -51,7 +51,7 @@ img_mod.Image = None
 sys.modules["PIL"] = pil_mod
 sys.modules["PIL.Image"] = img_mod
 
-from app import _score_result, _parse_web_search_results  # noqa: E402
+from app import _score_result, _parse_web_search_results, _deduplicate_by_url  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +218,38 @@ def test_juno_secondary_extracts_label_genre_bpm_and_track_number():
     assert results[0].get("label") == "Play This!"
     assert results[0].get("genre") == "Funky/Club House"
     assert results[0].get("bpm") == "124"
+
+
+JUNO_SECONDARY_HTML_ATC_TRACK = """
+<html><body>
+<div class="jd-listing-item-track" data-ua_location="track">
+  <div class="lit-artist-title"><div class="juno-artist"><a href="/artists/Test/">Test Artist</a></div><a class="juno-title" href="/products/test-release/7421830-02/">Test Track</a></div>
+  <div class="lit-date-length-tempo">5:38 / 124 BPM</div>
+  <div class="lit-actions"><button type="button" class="btn btn-widget-atc" onclick="uaAddCartEvent(event); return addToCart(7421830, 2, 4);">🛒1,58</button></div>
+</div>
+</body></html>
+"""
+
+
+def test_juno_secondary_track_number_from_add_to_cart_button():
+    results = _parse_web_search_results(
+        "Juno",
+        "https://www.junodownload.com/search/?q=test",
+        JUNO_SECONDARY_HTML_ATC_TRACK,
+        artist_q="Test Artist",
+        title_q="Test Track",
+    )
+    assert len(results) == 1
+    assert results[0].get("track_number") == "4"
+
+
+def test_deduplicate_by_url_merges_richer_metadata():
+    merged = _deduplicate_by_url([
+        {"url": "https://www.junodownload.com/products/a", "title": "A", "artist": "Artist", "score": 100.0, "direct_url": True, "is_fallback": False},
+        {"url": "https://www.junodownload.com/products/a", "title": "A", "artist": "Artist", "score": 100.0, "direct_url": True, "is_fallback": False,
+         "track_number": "4", "genre": "Funky/Club House", "bpm": "124"},
+    ])
+    assert len(merged) == 1
+    assert merged[0].get("track_number") == "4"
+    assert merged[0].get("genre") == "Funky/Club House"
+    assert merged[0].get("bpm") == "124"
