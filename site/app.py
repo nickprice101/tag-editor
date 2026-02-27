@@ -2854,9 +2854,19 @@ def ui_home():
     if not basic_auth_ok():
         return require_basic_auth()
 
-    # If path provided, open editor immediately
-    path = (request.args.get("path") or "").strip()
+    # If file/path provided, open editor immediately.
+    # `file` is kept as an alias for direct links such as `?file=/.../track.mp3`.
+    requested_path = (request.args.get("file") or request.args.get("path") or "").strip()
+    path = ""
+    if requested_path:
+        try:
+            path = safe_path(requested_path)
+        except Exception:
+            path = ""
+
     browse_default = _BROWSE_DEFAULT
+    if path:
+        browse_default = os.path.dirname(path)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -4549,6 +4559,15 @@ function applyGenreSuggestion(genre) {{
     logClickDebug("init", "loadDir ok");
   }} catch(e) {{
     logClickDebug("init", "loadDir failed", {{ error: String(e) }});
+  }}
+  try {{
+    const initialPath = (document.getElementById("path")?.value || "").trim();
+    if(initialPath) {{
+      await requestLoadFile(initialPath, {{ force: true, reason: "query-file" }});
+      logClickDebug("init", "query file loaded", {{ path: initialPath }});
+    }}
+  }} catch(e) {{
+    logClickDebug("init", "query file load failed", {{ error: String(e) }});
   }}
   try {{
     await loadKeyStatus();
