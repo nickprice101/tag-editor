@@ -1450,8 +1450,19 @@ def api_parse_url():
         return jsonify({"error": "This looks like a search page URL, not a direct track/product link. Open it manually instead."}), 400
 
     host = parsed_u.netloc.lower()
-    r = http_get(url, timeout=25)
-    r.raise_for_status()
+    get_fn = bandcamp_get if "bandcamp.com" in host else http_get
+    try:
+        r = get_fn(url, timeout=25)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if not isinstance(status, int):
+            status = 502
+        return jsonify({
+            "error": f"Unable to fetch URL ({status}). The source may be blocking this request; open manually and copy fields.",
+            "details": str(exc),
+        }), status
+
     html = r.text
     soup = BeautifulSoup(html, "html.parser")
 
@@ -4040,8 +4051,23 @@ async function parseUrl(){{
   const url = document.getElementById("purl").value.trim();
   const el = document.getElementById("parseResults");
   el.textContent = "Parsing…";
-  const res = await fetch(`/api/parse_url?url=${{encodeURIComponent(url)}}`);
-  const data = await res.json();
+  let res;
+  try {{
+    res = await fetch(`/api/parse_url?url=${{encodeURIComponent(url)}}`);
+  }} catch(err) {{
+    el.textContent = `Network error while parsing URL: ${{err && err.message ? err.message : err}}`;
+    return;
+  }}
+
+  let data = null;
+  const raw = await res.text();
+  try {{
+    data = JSON.parse(raw);
+  }} catch(_) {{
+    el.textContent = `Parse request failed (${{res.status}}). Server returned non-JSON response.`;
+    return;
+  }}
+
   if(!data.fields){{ el.textContent = data.error || "Error"; return; }}
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
   checkArtUrlDim();
