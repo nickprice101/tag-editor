@@ -3629,7 +3629,6 @@ function clearLookupResults() {{
     "discogsTracklist",
     "parseResults",
     "acoustidResults",
-    "lastfmResults",
     "genreSuggestions",
   ].forEach((id) => {{
     const el = document.getElementById(id);
@@ -4020,19 +4019,6 @@ async function useAcoustID(i){{
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
   await _autoFillGenreFromMB();
   if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
-}}
-
-function lastfm() {{
-  const artist = getField("artist"); const title = getField("title");
-  document.getElementById("lastfmResults").innerHTML = "";
-  startStream("lastfm",
-    `/api/lastfm_genre_stream?artist=${{encodeURIComponent(artist)}}&title=${{encodeURIComponent(title)}}`,
-    function(data) {{
-      const el = document.getElementById("lastfmResults");
-      if (!data.results) {{ el.textContent = data.error || "No tags"; return; }}
-      el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
-    }}
-  );
 }}
 
 let _dirItems = [], _searchItems = [];
