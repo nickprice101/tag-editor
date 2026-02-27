@@ -779,7 +779,7 @@ def upsert_id3(mp3_path: str, fields: dict):
         im.save(out, format="JPEG", quality=92)
         jpg = out.getvalue()
         tags.delall("APIC")
-        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=jpg))
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover Art", data=jpg))
 
     tags.save(mp3_path, v2_version=3)  # ID3v2.3
 
@@ -1022,7 +1022,7 @@ def api_art():
         quality = 90 if full else 75
         im.save(out, format="JPEG", quality=quality)
         return Response(out.getvalue(), mimetype="image/jpeg",
-                        headers={"Cache-Control": "max-age=3600"})
+                        headers={"Cache-Control": "no-store, max-age=0"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -3818,9 +3818,10 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   const artImg = document.getElementById("artImg");
   const artDims = document.getElementById("artDims");
   if(data.has_art){{
-    artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1`;
+    const artTs = Date.now();
+    artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1&t=${{artTs}}`;
     artPrev.style.display = "block";
-    fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}`).then(r=>r.json()).then(m=>{{
+    fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}&t=${{artTs}}`).then(r=>r.json()).then(m=>{{
       if(m.width) artDims.textContent = `${{m.width}}\u00d7${{m.height}}`;
     }}).catch(()=>{{}});
   }} else {{
