@@ -3623,13 +3623,18 @@ function clearLookupResults() {{
   window._webResults = [];
   window._ac = [];
   window._mb = [];
-  document.getElementById("mbResults").innerHTML = "";
-  document.getElementById("discogsResults").innerHTML = "";
-  document.getElementById("discogsTracklist").innerHTML = "";
-  document.getElementById("parseResults").innerHTML = "";
-  document.getElementById("acoustidResults").innerHTML = "";
-  document.getElementById("lastfmResults").innerHTML = "";
-  document.getElementById("genreSuggestions").innerHTML = "";
+  [
+    "mbResults",
+    "discogsResults",
+    "discogsTracklist",
+    "parseResults",
+    "acoustidResults",
+    "lastfmResults",
+    "genreSuggestions",
+  ].forEach((id) => {{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = "";
+  }});
 }}
 
 function upDir(){{
