@@ -779,7 +779,7 @@ def upsert_id3(mp3_path: str, fields: dict):
         im.save(out, format="JPEG", quality=92)
         jpg = out.getvalue()
         tags.delall("APIC")
-        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover Art", data=jpg))
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=jpg))
 
     tags.save(mp3_path, v2_version=3)  # ID3v2.3
 
