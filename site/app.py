@@ -3430,6 +3430,12 @@ function setBaseline(data) {{
   updateAllRevertUI();
 }}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
+function formatReleasedDateText(value) {{
+  const text = String(value || "").trim();
+  if(!text) return "";
+  const m = text.match(/^(\d{{4}}-\d{{2}}-\d{{2}})T/);
+  return m ? m[1] : text;
+}}
 function showToast(message, kind="info", ms=2800) {{
   const stack = document.getElementById("toastStack");
   if(!stack) return;
@@ -4056,7 +4062,7 @@ function webSearch(){{
             ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+inlineJsString(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
-            ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
+            ${{r.released ? `<div class="hint">Released: ${{esc(formatReleasedDateText(r.released))}}</div>` : ""}}
             ${{(r.track_number||r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.track_number ? 'Track #: '+esc(String(r.track_number)) : '', r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
