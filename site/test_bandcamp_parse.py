@@ -292,7 +292,7 @@ def test_bandcamp_get_uses_chrome_ua(monkeypatch):
 
 
 def test_bandcamp_get_sends_browser_headers(monkeypatch):
-    """bandcamp_get must include Accept, Accept-Language, Referer, Cache-Control."""
+    """bandcamp_get must include browser-style headers used for first-pass requests."""
     captured = {}
 
     def fake_get(url, headers=None, **kwargs):
@@ -305,8 +305,12 @@ def test_bandcamp_get_sends_browser_headers(monkeypatch):
     bandcamp_get("https://bandcamp.com/search?q=test", timeout=10)
 
     assert "Accept" in captured["headers"]
+    assert "Accept-Encoding" in captured["headers"]
     assert "Accept-Language" in captured["headers"]
     assert captured["headers"].get("Referer") == "https://bandcamp.com/"
+    assert captured["headers"].get("Sec-Fetch-Mode") == "navigate"
+    assert captured["headers"].get("Sec-Fetch-Site") == "same-origin"
+    assert captured["headers"].get("Upgrade-Insecure-Requests") == "1"
     assert captured["headers"].get("Cache-Control") == "no-cache"
 
 

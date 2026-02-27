@@ -9,7 +9,7 @@ from datetime import date as dt_date, datetime as dt_datetime
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote
 
 import requests
 import acoustid
@@ -79,10 +79,6 @@ MB_TXXX_FIELDS = [
     "musicbrainz_releasegroupid",
     "musicbrainz_artistid",
     "musicbrainz_albumartistid",
-    "musicbrainz_releasetrackid",
-    "musicbrainz_workid",
-    "musicbrainz_trmid",
-    "musicbrainz_discid",
     "musicbrainz_releasecountry",
     "musicbrainz_releasestatus",
     "musicbrainz_releasetype",
@@ -92,7 +88,6 @@ MB_TXXX_FIELDS = [
     "musicbrainz_artist",
     "musicbrainz_album",
     "barcode",
-    "asin",
 ]
 
 # Lightweight tag cache: (path, mtime) -> dict (max 2000 entries)
@@ -100,6 +95,15 @@ _tag_cache: dict = {}
 _TAG_CACHE_MAX = 2000
 
 app = Flask(__name__)
+
+_TAB_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>
+<rect width='64' height='64' rx='14' fill='%23FF1A55'/>
+<path d='M18 18h28v9H18zm0 14h28v14H18z' fill='white' opacity='.95'/>
+<circle cx='24' cy='39' r='3.4' fill='%23FF1A55'/>
+<circle cx='32' cy='39' r='3.4' fill='%23FF1A55'/>
+<circle cx='40' cy='39' r='3.4' fill='%23FF1A55'/>
+</svg>"""
+_TAB_ICON_DATA_URL = "data:image/svg+xml," + quote(_TAB_ICON_SVG)
 
 # ---------------- Auth ----------------
 def basic_auth_ok() -> bool:
@@ -574,13 +578,29 @@ def http_get(url: str, **kwargs):
     return requests.get(url, headers=headers, **kwargs)
 
 def bandcamp_get(url: str, **kwargs):
-    """GET helper for Bandcamp that sends browser-like headers to avoid 403s."""
+    """GET helper for Bandcamp that sends browser-like headers to avoid 403s.
+
+    This intentionally mirrors a normal top-level browser navigation request so
+    Bandcamp receives familiar fetch metadata during the first pass.
+    """
     headers = kwargs.pop("headers", {})
     headers.setdefault("User-Agent", BANDCAMP_UA)
     headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    headers.setdefault("Accept-Encoding", "gzip, deflate, br")
     headers.setdefault("Accept-Language", "en-US,en;q=0.9")
     headers.setdefault("Referer", "https://bandcamp.com/")
+    headers.setdefault("Origin", "https://bandcamp.com")
+    headers.setdefault("DNT", "1")
+    headers.setdefault("Upgrade-Insecure-Requests", "1")
+    headers.setdefault("Sec-Fetch-Dest", "document")
+    headers.setdefault("Sec-Fetch-Mode", "navigate")
+    headers.setdefault("Sec-Fetch-Site", "same-origin")
+    headers.setdefault("Sec-Fetch-User", "?1")
+    headers.setdefault("sec-ch-ua", '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"')
+    headers.setdefault("sec-ch-ua-mobile", "?0")
+    headers.setdefault("sec-ch-ua-platform", '"Windows"')
     headers.setdefault("Cache-Control", "no-cache")
+    headers.setdefault("Pragma", "no-cache")
     return requests.get(url, headers=headers, **kwargs)
 
 def _headless_get_html(url: str, timeout_secs: int = None, *, _browser=None) -> str:
@@ -1002,7 +1022,7 @@ def api_art():
         quality = 90 if full else 75
         im.save(out, format="JPEG", quality=quality)
         return Response(out.getvalue(), mimetype="image/jpeg",
-                        headers={"Cache-Control": "max-age=3600"})
+                        headers={"Cache-Control": "no-store, max-age=0"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1277,7 +1297,6 @@ def api_mb_recording():
     release_status = ""
     release_type = ""
     barcode = ""
-    asin = ""
 
     if releases:
         rel = releases[0]
@@ -1286,7 +1305,6 @@ def api_mb_recording():
         release_country = rel.get("country", "") or ""
         release_status = (rel.get("status") or "").lower()
         barcode = rel.get("barcode", "") or ""
-        asin = rel.get("asin", "") or ""
         rg = rel.get("release-group", {}) or {}
         release_group_id = rg.get("id", "") or ""
         release_type = (rg.get("primary-type") or "").lower()
@@ -1316,7 +1334,6 @@ def api_mb_recording():
         "musicbrainz_artist": artist,
         "musicbrainz_album": album,
         "barcode": barcode,
-        "asin": asin,
     }
     return jsonify({"fields": {k: v for k, v in fields.items() if v}})
 
@@ -1732,6 +1749,15 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     m_tn = re.search(r"track_number\s*:\s*'(\d+)'", onclick)
                     if m_tn:
                         track_number = m_tn.group(1)
+                # Additional fallback: cart/button onclick often contains
+                # addToCart(title_id, product_id, track_number)
+                if track_number is None:
+                    atc_btn = item.find("button", class_=re.compile(r"btn-widget-atc"))
+                    if atc_btn:
+                        onclick = atc_btn.get("onclick", "") or ""
+                        m_atc = re.search(r"addToCart\(\s*\d+\s*,\s*\d+\s*,\s*(\d+)\s*\)", onclick)
+                        if m_atc:
+                            track_number = m_atc.group(1)
                 if t and raw_href:
                     score = _score_result(artist_q, title_q, a, t, year_q, remix_tokens=remix_tokens, date_q=date_q) + \
                             _compilation_penalty(a)
@@ -2076,15 +2102,18 @@ def api_web_search_stream():
     date = (request.args.get("date") or "").strip()
     q_raw = (request.args.get("q") or "").strip()
 
-    # If q was explicitly provided, it is the source of truth for the search.
-    # Parse it as "Artist – Title" for scoring; otherwise fall back to the
-    # individual artist/title form fields.
+    # If q was explicitly provided, it is the source of truth for the outgoing
+    # search query URL.  For scoring, prefer explicit artist/title form fields
+    # when available (they are typically cleaner than a free-form q string).
     if q_raw:
         q = q_raw
-        q_artist, q_title = _split_query_artist_title(q_raw)
-        norm_title, norm_artist, remix_tokens = normalize_search_query(
-            q_title or q_raw, q_artist
-        )
+        if artist or title:
+            norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
+        else:
+            q_artist, q_title = _split_query_artist_title(q_raw)
+            norm_title, norm_artist, remix_tokens = normalize_search_query(
+                q_title or q_raw, q_artist
+            )
     else:
         q = f"{artist} {title}".strip()
         norm_title, norm_artist, remix_tokens = normalize_search_query(title, artist)
@@ -2212,6 +2241,12 @@ def api_web_search_stream():
                 yield sse_event("log", f"{site_name}: {len(found)} result(s)")
                 non_fb = [x for x in found if not x.get("is_fallback")]
                 # De-duplicate within source by URL
+                deduped = _deduplicate_by_url(non_fb)
+                if site_name == "Juno" and deduped and max((x.get("score", 0) for x in deduped), default=0) <= 0:
+                    deduped = []
+                    yield sse_event("log", "Juno: structured matches scored 0; returning search-page link instead")
+                found = _drop_zero_score_structured(found, site_name, search_url)
+                non_fb = [x for x in found if not x.get("is_fallback")]
                 deduped = _deduplicate_by_url(non_fb)
                 results_by_source[site_name] = (
                     sorted(deduped, key=lambda x: x.get("score", 0), reverse=True)[:5]
@@ -2376,17 +2411,67 @@ def _truncate_results_by_source(rbs: dict) -> dict:
     """Truncate long string fields in a results_by_source dict before JSON encoding."""
     return {source: _truncate_result_fields(results) for source, results in rbs.items()}
 
+def _merge_result_entries(base: dict, candidate: dict) -> dict:
+    """Merge two same-URL result dicts, preserving richer metadata.
+
+    Preference rules:
+      - Keep the higher score.
+      - Prefer direct URLs over non-direct/fallback variants.
+      - Fill empty fields from the candidate (track_number, bpm, genre, etc.).
+    """
+    merged = dict(base)
+    if candidate.get("score", 0) > merged.get("score", 0):
+        merged["score"] = candidate.get("score", 0)
+    if candidate.get("direct_url") and not merged.get("direct_url"):
+        merged["direct_url"] = True
+    if not candidate.get("is_fallback"):
+        merged["is_fallback"] = False
+    for k, v in candidate.items():
+        if k in ("score", "direct_url", "is_fallback"):
+            continue
+        if v in (None, ""):
+            continue
+        if merged.get(k) in (None, ""):
+            merged[k] = v
+    return merged
+
+
 def _deduplicate_by_url(results: list) -> list:
-    """Return results with duplicates (same URL) removed, preserving order."""
-    seen: set = set()
-    deduped = []
+    """Return results with duplicate URLs merged, preserving first-seen order."""
+    by_url: dict = {}
+    order = []
     for x in results:
         u = x.get("url", "")
-        if u and u in seen:
+        if not u:
+            order.append(x)
             continue
-        seen.add(u)
-        deduped.append(x)
-    return deduped
+        if u not in by_url:
+            by_url[u] = dict(x)
+            order.append(by_url[u])
+            continue
+        by_url[u] = _merge_result_entries(by_url[u], x)
+        for idx, item in enumerate(order):
+            if isinstance(item, dict) and item.get("url") == u:
+                order[idx] = by_url[u]
+                break
+    return order
+
+
+def _drop_zero_score_structured(results: list, site_name: str, search_url: str) -> list:
+    """Drop structured results with zero score; keep fallback when nothing useful remains."""
+    kept = [x for x in results if x.get("is_fallback") or x.get("score", 0) > 0]
+    if kept:
+        return kept
+    return [{
+        "source": site_name,
+        "title": f"View search results on {site_name}",
+        "artist": "",
+        "url": search_url,
+        "score": 0.0,
+        "note": "No non-zero matches extracted; open manually.",
+        "direct_url": False,
+        "is_fallback": True,
+    }]
 
 def sse_response(gen):
     return Response(gen, content_type="text/event-stream",
@@ -2769,9 +2854,19 @@ def ui_home():
     if not basic_auth_ok():
         return require_basic_auth()
 
-    # If path provided, open editor immediately
-    path = (request.args.get("path") or "").strip()
+    # If file/path provided, open editor immediately.
+    # `file` is kept as an alias for direct links such as `?file=/.../track.mp3`.
+    requested_path = (request.args.get("file") or request.args.get("path") or "").strip()
+    path = ""
+    if requested_path:
+        try:
+            path = safe_path(requested_path)
+        except Exception:
+            path = ""
+
     browse_default = _BROWSE_DEFAULT
+    if path:
+        browse_default = os.path.dirname(path)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2779,6 +2874,7 @@ def ui_home():
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>MP3 Tag Editor</title>
+  <link rel="icon" type="image/svg+xml" href="{_TAB_ICON_DATA_URL}"/>
   <style>
     :root {{
       --accent: #FF1A55;
@@ -2807,7 +2903,7 @@ def ui_home():
       color: var(--text);
       margin: 0;
       padding: 20px;
-      max-width: 1300px;
+      width: 100%;
       line-height: 1.4;
     }}
     h1 {{ font-size: 1.28rem; font-weight: 750; margin: 0 0 3px; letter-spacing: -.02em; }}
@@ -2897,6 +2993,7 @@ def ui_home():
       gap: 12px;
     }}
     @media(max-width:1100px){{ .lookup-grid {{ grid-template-columns: 1fr; }} }}
+    .lookup-stack {{ display:grid; gap:12px; }}
     .lookup-card {{
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
@@ -2988,7 +3085,7 @@ def ui_home():
     .field-group {{ margin-bottom: 0; }}
     #resultModal {{
       display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
-      z-index: 1000; align-items: center; justify-content: center;
+      z-index: 2100; align-items: center; justify-content: center;
     }}
     #resultModal.open {{ display: flex; }}
     .modal-inner {{
@@ -3043,7 +3140,10 @@ def ui_home():
     <h2>Search</h2>
     <p class="sub">Search recursively. <strong>Double-click</strong> a file to load it.</p>
     <label>Search root</label>
-    <input id="sroot" value="{MUSIC_ROOT}"/>
+    <div class="input-inline">
+      <input id="sroot" value="{MUSIC_ROOT}"/>
+      <button class="btn btn-ghost" type="button" onclick="openDirectoryPicker('sroot')">Browse…</button>
+    </div>
     <label>Query</label>
     <input id="sq" placeholder="filename or partial path"/>
     <button class="btn" type="button" onclick="doSearch()">Search</button>
@@ -3090,20 +3190,7 @@ def ui_home():
       <h3>Lookups</h3>
       <div class="lookup-grid">
         <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">MusicBrainz Search&hellip;</button>
-          <div id="mbResults"></div>
-        </div>
-        <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
-          <div id="discogsStatus" class="stream-status"></div>
-          <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
-          <div id="discogsResults"></div>
-          <div id="discogsTracklist"></div>
-        </div>
-      </div>
-      <div class="lookup-grid" style="margin-top:12px">
-        <div class="lookup-card">
-          <input id="wsq" placeholder="Web search: e.g. Artist \u2013 Title"/>
+          <input id="wsq" placeholder="Web search: e.g. Artist – Title"/>
           <button type="button" class="btn btn-outline" onclick="webSearch()">Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
           <div id="webSearchStatus" class="stream-status"></div>
           <div id="webSearchResults"></div>
@@ -3112,12 +3199,25 @@ def ui_home():
           <button type="button" class="btn btn-outline" onclick="parseUrl()">Parse URL</button>
           <div id="parseResults"></div>
         </div>
-        <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
-          <div id="acoustidStatus" class="stream-status"></div>
-          <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
-          <div id="acoustidResults"></div>
-          <div id="acoustidMbStatus" class="hint"></div>
+        <div class="lookup-stack">
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">MusicBrainz Search&hellip;</button>
+            <div id="mbResults"></div>
+          </div>
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
+            <div id="acoustidStatus" class="stream-status"></div>
+            <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
+            <div id="acoustidResults"></div>
+            <div id="acoustidMbStatus" class="hint"></div>
+          </div>
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
+            <div id="discogsStatus" class="stream-status"></div>
+            <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
+            <div id="discogsResults"></div>
+            <div id="discogsTracklist"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -3129,10 +3229,6 @@ def ui_home():
         <div class="callout-title" style="margin-bottom:0">Minimum required tags</div>
         <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">Revert</button>
       </div>
-      <div class="quick-actions">
-        <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button>
-      </div>
-
       <div class="field-card">
         <h4>Core details</h4>
         <div class="field-grid-2">
@@ -3143,7 +3239,7 @@ def ui_home():
         </div>
         <div class="field-group">
           <label>Involved people list</label>
-          <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
+          <input name="involved_people_list" placeholder="DJ Jazzy Jeff, The Fresh Prince"/>
           <div class="hint">Stored as <span class="mono">TIPL</span> and <span class="mono">TXXX:involved_people_list</span></div>
         </div>
       </div>
@@ -3153,7 +3249,7 @@ def ui_home():
         <div class="field-grid-3">
           <div class="field-group"><label>Date <button type="button" class="chip-btn" onclick="copyYearToDate()">Set date from year</button></label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
           <div class="field-group"><label>Year <button type="button" class="chip-btn" onclick="copyDateToYear()">Set year from date</button></label><input name="year" placeholder="YYYY"/></div>
-          <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
+          <div class="field-group"><label>Original Year <button type="button" class="chip-btn" onclick="copyYearToOriginalYear()">Set orig. year from year</button></label><input name="original_year" placeholder="YYYY"/></div>
         </div>
         <div class="field-grid-3">
           <div class="field-group">
@@ -3161,10 +3257,10 @@ def ui_home():
             <input name="genre"/>
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
-          <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
+          <div class="field-group"><label>Track number <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button></label><input name="track" placeholder="1/0"/></div>
         </div>
         <div class="field-grid-3">
-          <div class="field-group"><label>BPM</label><input name="bpm" placeholder="(optional)"/></div>
+          <div class="field-group"><label>BPM</label><input name="bpm" placeholder="am (optional)"/></div>
         </div>
         <div class="hint">BPM stored as <span class="mono">TBPM</span> (decimals truncated; non-numeric ignored)</div>
       </div>
@@ -3174,12 +3270,12 @@ def ui_home():
         <div class="field-grid-2">
           <div class="field-group">
             <label>Artist sort</label>
-            <input name="artist_sort" placeholder="Beatles, The"/>
+            <input name="artist_sort" placeholder="Pharcyde, The or Morales, David"/>
             <label class="inline-check"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Name?</label>
           </div>
           <div class="field-group">
             <label>Album artist sort</label>
-            <input name="albumartist_sort" placeholder="Beatles, The"/>
+            <input name="albumartist_sort" placeholder="Pharcyde, The or Morales, David"/>
             <label class="inline-check"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Name?</label>
           </div>
         </div>
@@ -3226,10 +3322,6 @@ def ui_home():
           <div class="field-group"><label>MusicBrainz Release Group ID</label><input name="musicbrainz_releasegroupid" class="mono" placeholder="UUID"/></div>
           <div class="field-group"><label>MusicBrainz Artist ID</label><input name="musicbrainz_artistid" class="mono" placeholder="UUID"/></div>
           <div class="field-group"><label>MusicBrainz Album Artist ID</label><input name="musicbrainz_albumartistid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Release Track ID</label><input name="musicbrainz_releasetrackid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Work ID</label><input name="musicbrainz_workid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz TRMID (legacy)</label><input name="musicbrainz_trmid" class="mono" placeholder="UUID"/></div>
-          <div class="field-group"><label>MusicBrainz Disc ID</label><input name="musicbrainz_discid" class="mono" placeholder="disc id"/></div>
         </div>
         <div>
           <div class="field-group"><label>MusicBrainz Release Country</label><input name="musicbrainz_releasecountry" placeholder="e.g. GB"/></div>
@@ -3241,7 +3333,6 @@ def ui_home():
           <div class="field-group"><label>MusicBrainz Artist</label><input name="musicbrainz_artist"/></div>
           <div class="field-group"><label>MusicBrainz Album</label><input name="musicbrainz_album"/></div>
           <div class="field-group"><label>Barcode</label><input name="barcode" placeholder="EAN/UPC"/></div>
-          <div class="field-group"><label>ASIN</label><input name="asin" placeholder="Amazon ASIN"/></div>
         </div>
       </div>
     </details>
@@ -3349,6 +3440,12 @@ function setBaseline(data) {{
   updateAllRevertUI();
 }}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
+function formatReleasedDateText(value) {{
+  const text = String(value || "").trim();
+  if(!text) return "";
+  const m = text.match(/^(\d{{4}}-\d{{2}}-\d{{2}})T/);
+  return m ? m[1] : text;
+}}
 function showToast(message, kind="info", ms=2800) {{
   const stack = document.getElementById("toastStack");
   if(!stack) return;
@@ -3363,6 +3460,9 @@ function confidenceBadge(score) {{
   if(v >= 85) return '<span class="match-badge match-high">High · ' + Math.round(v) + '</span>';
   if(v >= 65) return '<span class="match-badge match-medium">Medium · ' + Math.round(v) + '</span>';
   return '<span class="match-badge match-low">Low · ' + Math.round(v) + '</span>';
+}}
+function inlineJsString(s) {{
+  return JSON.stringify(String(s || ""));
 }}
 function getSelectedPaths() {{
   return Array.from(document.querySelectorAll('.file-item-select:checked')).map(el => el.dataset.path || "").filter(Boolean);
@@ -3476,14 +3576,23 @@ function copyDateToYear() {{
   if(m) setField("year", m[1]);
 }}
 
+function copyYearToOriginalYear() {{
+  const year = getField("year").trim();
+  if(/^\d{{4}}$/.test(year)) setField("original_year", year);
+}}
+
 function normalizeTrackFormat() {{
   const raw = getField("track").trim();
-  if(!raw) return;
+  if(!raw) {{
+    setField("track", "1/1");
+    return;
+  }}
   const parts = raw.split("/").map(p => p.trim());
   const left = parseInt(parts[0] || "", 10);
   const right = parseInt(parts[1] || "", 10);
   if(Number.isFinite(left) && Number.isFinite(right)) setField("track", `${{left}}/${{right}}`);
-  else if(Number.isFinite(left)) setField("track", String(left));
+  else if(Number.isFinite(left)) setField("track", `${{left}}/1`);
+  else setField("track", "1/1");
 }}
 function applyIsName(fieldName, sortFieldName, cb) {{
   if(!cb.checked) return;
@@ -3537,12 +3646,15 @@ async function loadDir(){{
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
 let _dirPickerPath = "";
+let _dirPickerTarget = "dir";
 function closeDirectoryPicker() {{
   const m = document.getElementById("dirPickerModal");
   if(m) m.style.display = "none";
 }}
-async function openDirectoryPicker() {{
-  _dirPickerPath = document.getElementById("dir").value.trim() || "{MUSIC_ROOT}";
+async function openDirectoryPicker(targetId = "dir") {{
+  _dirPickerTarget = targetId || "dir";
+  const targetInput = document.getElementById(_dirPickerTarget);
+  _dirPickerPath = (targetInput ? targetInput.value.trim() : "") || "{MUSIC_ROOT}";
   const m = document.getElementById("dirPickerModal");
   if(m) m.style.display = "flex";
   await loadDirectoryPicker(_dirPickerPath);
@@ -3573,9 +3685,10 @@ function dirPickerUp() {{
 }}
 function confirmDirectoryPicker() {{
   if(!_dirPickerPath) return;
-  document.getElementById("dir").value = _dirPickerPath;
+  const targetInput = document.getElementById(_dirPickerTarget || "dir");
+  if(targetInput) targetInput.value = _dirPickerPath;
   closeDirectoryPicker();
-  loadDir();
+  if((_dirPickerTarget || "dir") === "dir") loadDir();
 }}
 
 function openFile(p){{
@@ -3623,13 +3736,17 @@ function clearLookupResults() {{
   window._webResults = [];
   window._ac = [];
   window._mb = [];
-  document.getElementById("mbResults").innerHTML = "";
-  document.getElementById("discogsResults").innerHTML = "";
-  document.getElementById("discogsTracklist").innerHTML = "";
-  document.getElementById("parseResults").innerHTML = "";
-  document.getElementById("acoustidResults").innerHTML = "";
-  document.getElementById("lastfmResults").innerHTML = "";
-  document.getElementById("genreSuggestions").innerHTML = "";
+  [
+    "mbResults",
+    "discogsResults",
+    "discogsTracklist",
+    "parseResults",
+    "acoustidResults",
+    "genreSuggestions",
+  ].forEach((id) => {{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = "";
+  }});
 }}
 
 function upDir(){{
@@ -3657,11 +3774,10 @@ async function doSearch(){{
 }}
 
 const MB_FIELDS = ["musicbrainz_trackid","musicbrainz_albumid","musicbrainz_releasegroupid",
-  "musicbrainz_artistid","musicbrainz_albumartistid","musicbrainz_releasetrackid",
-  "musicbrainz_workid","musicbrainz_trmid","musicbrainz_discid","musicbrainz_releasecountry",
+  "musicbrainz_artistid","musicbrainz_albumartistid","musicbrainz_releasecountry",
   "musicbrainz_releasestatus","musicbrainz_releasetype","musicbrainz_albumtype",
   "musicbrainz_albumstatus","musicbrainz_albumartist","musicbrainz_artist","musicbrainz_album",
-  "barcode","asin"];
+  "barcode"];
 
 const TAG_FIELDS = ["title","artist","album","albumartist","involved_people_list","date","genre",
   "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
@@ -3708,6 +3824,8 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
   setBaseline(null);
+  // Default missing track number to unsaved 1/1 so user reviews before save.
+  if(!getField("track").trim()) setField("track", "1/1");
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
@@ -3716,9 +3834,10 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   const artImg = document.getElementById("artImg");
   const artDims = document.getElementById("artDims");
   if(data.has_art){{
-    artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1`;
+    const artTs = Date.now();
+    artImg.src = `/api/art?path=${{encodeURIComponent(p)}}&full=1&t=${{artTs}}`;
     artPrev.style.display = "block";
-    fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}`).then(r=>r.json()).then(m=>{{
+    fetch(`/api/art_meta?path=${{encodeURIComponent(p)}}&t=${{artTs}}`).then(r=>r.json()).then(m=>{{
       if(m.width) artDims.textContent = `${{m.width}}\u00d7${{m.height}}`;
     }}).catch(()=>{{}});
   }} else {{
@@ -3780,11 +3899,12 @@ function runMbSearch(){{
         const artUrl = r.cover_image || "";
         const thumbUrl = r.thumb || "";
         return `<div class="result-item" style="margin-top:8px">
-          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\'none\'" loading="lazy" onclick="showImageModal('+JSON.stringify(artUrl||thumbUrl)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+inlineJsString(artUrl||thumbUrl)+')" data-full="'+esc(artUrl||thumbUrl)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>${{confidenceBadge(r.score)}}
           ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
+            ${{r.id ? `<a href="https://musicbrainz.org/recording/${{esc(r.id)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open ↗</a>` : ""}}
             ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(artUrl)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
           </div>
           <div class="hint mono">MBID: ${{esc(r.id)}}</div>
@@ -3880,7 +4000,7 @@ function discogsSearch() {{
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
             ${{r.uri ? `<a href="${{esc(r.uri)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
             ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
-            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" title="Click to enlarge" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\\'\u00d7\\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal('+inlineJsString(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" title="Click to enlarge" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           </div>
         </div>`).join("");
     }}
@@ -3949,16 +4069,16 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\'none\'" loading="lazy" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" onload="var s=this.nextElementSibling;if(s&&this.naturalWidth)s.textContent=this.naturalWidth+\'×\'+this.naturalHeight;">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+inlineJsString(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
-            ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
-            ${{(r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
+            ${{r.released ? `<div class="hint">Released: ${{esc(formatReleasedDateText(r.released))}}</div>` : ""}}
+            ${{(r.track_number||r.bpm||r.genre||r.key) ? `<div class="hint">${{[r.track_number ? 'Track #: '+esc(String(r.track_number)) : '', r.genre ? 'Genre: '+esc(r.genre) : '', r.bpm ? 'BPM: '+esc(String(r.bpm)) : '', r.key ? 'Key: '+esc(r.key) : ''].filter(Boolean).join(' \u00b7 ')}}</div>` : ""}}
             <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
               ${{r.url ? `<a href="${{esc(r.url)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
               ${{r.direct_url ? `<button type="button" class="btn btn-sm" onclick="applyWebResult(${{i}})">Parse URL</button>` : `<span style="color:var(--muted);font-size:.78rem;font-style:italic">Search page \u2014 open manually</span>`}}
               ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy art URL to clipboard">&#128203; Art URL</button>` : ""}}
-              ${{confidenceBadge(r.score)}}
+              ${{!r.is_fallback ? confidenceBadge(r.score) : ""}}
             </div>
             ${{r.note ? `<div class="hint">${{esc(r.note)}}</div>` : ""}}
           </div>`;
@@ -3980,6 +4100,7 @@ async function applyWebResult(i){{
   // Prefill BPM and genre from search result if those fields are currently blank
   if(r.bpm && !getField("bpm")) setField("bpm", String(r.bpm));
   if(r.genre && !getField("genre")) setField("genre", r.genre);
+  if(r.track_number && !getField("track")) setField("track", String(r.track_number));
   document.getElementById("purl").value = r.url;
   parseUrl();
 }}
@@ -4015,19 +4136,6 @@ async function useAcoustID(i){{
   for(const [k,v] of Object.entries(data.fields)) setField(k, v);
   await _autoFillGenreFromMB();
   if(st) st.textContent = "\u2713 Applied all MB/Picard fields.";
-}}
-
-function lastfm() {{
-  const artist = getField("artist"); const title = getField("title");
-  document.getElementById("lastfmResults").innerHTML = "";
-  startStream("lastfm",
-    `/api/lastfm_genre_stream?artist=${{encodeURIComponent(artist)}}&title=${{encodeURIComponent(title)}}`,
-    function(data) {{
-      const el = document.getElementById("lastfmResults");
-      if (!data.results) {{ el.textContent = data.error || "No tags"; return; }}
-      el.innerHTML = data.results.map(t => `<button type="button" class="btn btn-sm btn-outline" onclick="setField(\'genre\',${{JSON.stringify(t)}})">${{esc(t)}}</button>`).join("");
-    }}
-  );
 }}
 
 let _dirItems = [], _searchItems = [];
@@ -4090,7 +4198,30 @@ function handleListItemActivation(listName, item) {{
     openDir(item.path);
     return;
   }}
+  resetRightPaneSearchState();
   requestLoadFile(item.path, {{ force: true, reason: `${{listName}}-activate` }});
+}}
+
+function resetRightPaneSearchState() {{
+  for (const [id, es] of Object.entries(_streams)) {{
+    try {{ es.close(); }} catch (_) {{}}
+    delete _streams[id];
+  }}
+  const statusIds = ["webSearchStatus", "acoustidStatus", "discogsStatus", "mbSearchStatus"];
+  for (const id of statusIds) {{
+    const el = document.getElementById(id);
+    if(!el) continue;
+    el.className = "stream-status";
+    el.innerHTML = "";
+  }}
+  const resultIds = [
+    "webSearchResults", "mbResults", "mbDlgResults", "acoustidResults",
+    "discogsResults", "discogsTracklist", "parseResults", "acoustidMbStatus", "mbDlgStatus"
+  ];
+  for (const id of resultIds) {{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = "";
+  }}
 }}
 
 function trackListClick(listName, idx, item) {{
@@ -4144,10 +4275,6 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
   e.preventDefault();
-  if(!validateBeforeSave()) {{
-    showToast("Please fill the required fields before saving.", "error");
-    return;
-  }}
   const fd = new FormData(e.target);
   if(e.submitter && e.submitter.name) fd.set(e.submitter.name, e.submitter.value);
   try {{
@@ -4185,6 +4312,9 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
           if(artPrev2) artPrev2.style.display = "block";
         }}
       }}
+      // Refresh browse/search lists so saved tags are immediately visible.
+      await loadDir();
+      await doSearch();
     }} else {{
       showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
       showToast(data.error || "Save failed", "error");
@@ -4214,6 +4344,27 @@ function showArtModal(src) {{
       if(d && img.naturalWidth && img.naturalHeight) d.textContent = img.naturalWidth + "\u00d7" + img.naturalHeight;
     }});
   }}
+}}
+
+const _coverDimCache = new Map();
+
+function onResultThumbLoad(img, fullSrc) {{
+  const d = img ? img.nextElementSibling : null;
+  const full = String(fullSrc || "").trim();
+  if(!d || !/^https?:\/\//i.test(full)) return;
+  const cached = _coverDimCache.get(full);
+  if(cached) {{
+    d.textContent = cached.width + "×" + cached.height;
+    return;
+  }}
+  fetch(`/api/url_dim?url=${{encodeURIComponent(full)}}`)
+    .then(r => r.json())
+    .then(data => {{
+      if(!data || !data.width || !data.height) return;
+      _coverDimCache.set(full, {{ width: data.width, height: data.height }});
+      d.textContent = data.width + "×" + data.height;
+    }})
+    .catch(() => {{}});
 }}
 
 function showImageModal(src) {{
@@ -4408,6 +4559,15 @@ function applyGenreSuggestion(genre) {{
     logClickDebug("init", "loadDir ok");
   }} catch(e) {{
     logClickDebug("init", "loadDir failed", {{ error: String(e) }});
+  }}
+  try {{
+    const initialPath = (document.getElementById("path")?.value || "").trim();
+    if(initialPath) {{
+      await requestLoadFile(initialPath, {{ force: true, reason: "query-file" }});
+      logClickDebug("init", "query file loaded", {{ path: initialPath }});
+    }}
+  }} catch(e) {{
+    logClickDebug("init", "query file load failed", {{ error: String(e) }});
   }}
   try {{
     await loadKeyStatus();
