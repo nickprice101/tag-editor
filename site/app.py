@@ -2807,7 +2807,7 @@ def ui_home():
       color: var(--text);
       margin: 0;
       padding: 20px;
-      max-width: 1300px;
+      width: 100%;
       line-height: 1.4;
     }}
     h1 {{ font-size: 1.28rem; font-weight: 750; margin: 0 0 3px; letter-spacing: -.02em; }}
@@ -2897,6 +2897,7 @@ def ui_home():
       gap: 12px;
     }}
     @media(max-width:1100px){{ .lookup-grid {{ grid-template-columns: 1fr; }} }}
+    .lookup-stack {{ display:grid; gap:12px; }}
     .lookup-card {{
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
@@ -3043,7 +3044,10 @@ def ui_home():
     <h2>Search</h2>
     <p class="sub">Search recursively. <strong>Double-click</strong> a file to load it.</p>
     <label>Search root</label>
-    <input id="sroot" value="{MUSIC_ROOT}"/>
+    <div class="input-inline">
+      <input id="sroot" value="{MUSIC_ROOT}"/>
+      <button class="btn btn-ghost" type="button" onclick="openDirectoryPicker('sroot')">Browse…</button>
+    </div>
     <label>Query</label>
     <input id="sq" placeholder="filename or partial path"/>
     <button class="btn" type="button" onclick="doSearch()">Search</button>
@@ -3090,20 +3094,7 @@ def ui_home():
       <h3>Lookups</h3>
       <div class="lookup-grid">
         <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">MusicBrainz Search&hellip;</button>
-          <div id="mbResults"></div>
-        </div>
-        <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
-          <div id="discogsStatus" class="stream-status"></div>
-          <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
-          <div id="discogsResults"></div>
-          <div id="discogsTracklist"></div>
-        </div>
-      </div>
-      <div class="lookup-grid" style="margin-top:12px">
-        <div class="lookup-card">
-          <input id="wsq" placeholder="Web search: e.g. Artist \u2013 Title"/>
+          <input id="wsq" placeholder="Web search: e.g. Artist – Title"/>
           <button type="button" class="btn btn-outline" onclick="webSearch()">Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
           <div id="webSearchStatus" class="stream-status"></div>
           <div id="webSearchResults"></div>
@@ -3112,12 +3103,25 @@ def ui_home():
           <button type="button" class="btn btn-outline" onclick="parseUrl()">Parse URL</button>
           <div id="parseResults"></div>
         </div>
-        <div class="lookup-card">
-          <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
-          <div id="acoustidStatus" class="stream-status"></div>
-          <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
-          <div id="acoustidResults"></div>
-          <div id="acoustidMbStatus" class="hint"></div>
+        <div class="lookup-stack">
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="mbSearchDialog()">MusicBrainz Search&hellip;</button>
+            <div id="mbResults"></div>
+          </div>
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="acoustid()">AcoustID Fingerprint</button>
+            <div id="acoustidStatus" class="stream-status"></div>
+            <p id="acoustidKeyStatus" class="sub" style="margin-top:4px"></p>
+            <div id="acoustidResults"></div>
+            <div id="acoustidMbStatus" class="hint"></div>
+          </div>
+          <div class="lookup-card">
+            <button type="button" class="btn btn-outline" onclick="discogsSearch()">Discogs Search (album)</button>
+            <div id="discogsStatus" class="stream-status"></div>
+            <p id="discogsKeyStatus" class="sub" style="margin-top:4px"></p>
+            <div id="discogsResults"></div>
+            <div id="discogsTracklist"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -3129,10 +3133,6 @@ def ui_home():
         <div class="callout-title" style="margin-bottom:0">Minimum required tags</div>
         <button type="button" class="btn btn-sm btn-ghost" onclick="revertTags()" title="Reload tags from disk, restore fields and clear lookup results">Revert</button>
       </div>
-      <div class="quick-actions">
-        <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button>
-      </div>
-
       <div class="field-card">
         <h4>Core details</h4>
         <div class="field-grid-2">
@@ -3143,7 +3143,7 @@ def ui_home():
         </div>
         <div class="field-group">
           <label>Involved people list</label>
-          <input name="involved_people_list" placeholder="Britney Spears, Christina Aguilera"/>
+          <input name="involved_people_list" placeholder="DJ Jazzy Jeff, The Fresh Prince"/>
           <div class="hint">Stored as <span class="mono">TIPL</span> and <span class="mono">TXXX:involved_people_list</span></div>
         </div>
       </div>
@@ -3153,7 +3153,7 @@ def ui_home():
         <div class="field-grid-3">
           <div class="field-group"><label>Date <button type="button" class="chip-btn" onclick="copyYearToDate()">Set date from year</button></label><input name="date" placeholder="YYYY or YYYY-MM-DD"/></div>
           <div class="field-group"><label>Year <button type="button" class="chip-btn" onclick="copyDateToYear()">Set year from date</button></label><input name="year" placeholder="YYYY"/></div>
-          <div class="field-group"><label>Original Year</label><input name="original_year" placeholder="YYYY"/></div>
+          <div class="field-group"><label>Original Year <button type="button" class="chip-btn" onclick="copyYearToOriginalYear()">Set orig. year from year</button></label><input name="original_year" placeholder="YYYY"/></div>
         </div>
         <div class="field-grid-3">
           <div class="field-group">
@@ -3161,10 +3161,10 @@ def ui_home():
             <input name="genre"/>
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
-          <div class="field-group"><label>Track number</label><input name="track" placeholder="1 or 1/12"/></div>
+          <div class="field-group"><label>Track number <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button></label><input name="track" placeholder="1/0"/></div>
         </div>
         <div class="field-grid-3">
-          <div class="field-group"><label>BPM</label><input name="bpm" placeholder="(optional)"/></div>
+          <div class="field-group"><label>BPM</label><input name="bpm" placeholder="am (optional)"/></div>
         </div>
         <div class="hint">BPM stored as <span class="mono">TBPM</span> (decimals truncated; non-numeric ignored)</div>
       </div>
@@ -3174,12 +3174,12 @@ def ui_home():
         <div class="field-grid-2">
           <div class="field-group">
             <label>Artist sort</label>
-            <input name="artist_sort" placeholder="Beatles, The"/>
+            <input name="artist_sort" placeholder="Pharcyde, The or Morales, David"/>
             <label class="inline-check"><input type="checkbox" id="isNameArtist" onchange="applyIsName('artist','artist_sort',this)"/> Name?</label>
           </div>
           <div class="field-group">
             <label>Album artist sort</label>
-            <input name="albumartist_sort" placeholder="Beatles, The"/>
+            <input name="albumartist_sort" placeholder="Pharcyde, The or Morales, David"/>
             <label class="inline-check"><input type="checkbox" id="isNameAlbumartist" onchange="applyIsName('albumartist','albumartist_sort',this)"/> Name?</label>
           </div>
         </div>
@@ -3476,14 +3476,23 @@ function copyDateToYear() {{
   if(m) setField("year", m[1]);
 }}
 
+function copyYearToOriginalYear() {{
+  const year = getField("year").trim();
+  if(/^\d{{4}}$/.test(year)) setField("original_year", year);
+}}
+
 function normalizeTrackFormat() {{
   const raw = getField("track").trim();
-  if(!raw) return;
+  if(!raw) {{
+    setField("track", "1/1");
+    return;
+  }}
   const parts = raw.split("/").map(p => p.trim());
   const left = parseInt(parts[0] || "", 10);
   const right = parseInt(parts[1] || "", 10);
   if(Number.isFinite(left) && Number.isFinite(right)) setField("track", `${{left}}/${{right}}`);
-  else if(Number.isFinite(left)) setField("track", String(left));
+  else if(Number.isFinite(left)) setField("track", `${{left}}/1`);
+  else setField("track", "1/1");
 }}
 function applyIsName(fieldName, sortFieldName, cb) {{
   if(!cb.checked) return;
@@ -3537,12 +3546,15 @@ async function loadDir(){{
 
 function openDir(p){{ document.getElementById("dir").value = p; loadDir(); }}
 let _dirPickerPath = "";
+let _dirPickerTarget = "dir";
 function closeDirectoryPicker() {{
   const m = document.getElementById("dirPickerModal");
   if(m) m.style.display = "none";
 }}
-async function openDirectoryPicker() {{
-  _dirPickerPath = document.getElementById("dir").value.trim() || "{MUSIC_ROOT}";
+async function openDirectoryPicker(targetId = "dir") {{
+  _dirPickerTarget = targetId || "dir";
+  const targetInput = document.getElementById(_dirPickerTarget);
+  _dirPickerPath = (targetInput ? targetInput.value.trim() : "") || "{MUSIC_ROOT}";
   const m = document.getElementById("dirPickerModal");
   if(m) m.style.display = "flex";
   await loadDirectoryPicker(_dirPickerPath);
@@ -3573,9 +3585,10 @@ function dirPickerUp() {{
 }}
 function confirmDirectoryPicker() {{
   if(!_dirPickerPath) return;
-  document.getElementById("dir").value = _dirPickerPath;
+  const targetInput = document.getElementById(_dirPickerTarget || "dir");
+  if(targetInput) targetInput.value = _dirPickerPath;
   closeDirectoryPicker();
-  loadDir();
+  if((_dirPickerTarget || "dir") === "dir") loadDir();
 }}
 
 function openFile(p){{
@@ -3712,6 +3725,8 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
   // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
   setBaseline(null);
+  // Default missing track number to unsaved 1/1 so user reviews before save.
+  if(!getField("track").trim()) setField("track", "1/1");
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
