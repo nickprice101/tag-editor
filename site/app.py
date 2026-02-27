@@ -3445,6 +3445,9 @@ function confidenceBadge(score) {{
   if(v >= 65) return '<span class="match-badge match-medium">Medium · ' + Math.round(v) + '</span>';
   return '<span class="match-badge match-low">Low · ' + Math.round(v) + '</span>';
 }}
+function inlineJsString(s) {{
+  return JSON.stringify(String(s || ""));
+}}
 function getSelectedPaths() {{
   return Array.from(document.querySelectorAll('.file-item-select:checked')).map(el => el.dataset.path || "").filter(Boolean);
 }}
@@ -3879,11 +3882,12 @@ function runMbSearch(){{
         const artUrl = r.cover_image || "";
         const thumbUrl = r.thumb || "";
         return `<div class="result-item" style="margin-top:8px">
-          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(artUrl||thumbUrl)+')" data-full="'+esc(artUrl||thumbUrl)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+          ${{thumbUrl ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(thumbUrl)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+inlineJsString(artUrl||thumbUrl)+')" data-full="'+esc(artUrl||thumbUrl)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           <strong>${{esc(r.title)}}</strong> — ${{esc(r.artist||"")}} <span style="color:var(--muted)">${{esc(r.date||"")}}</span>${{confidenceBadge(r.score)}}
           ${{r.album ? `<div class="hint">Album: <strong>${{esc(r.album)}}</strong>${{r.albumartist ? ` — ${{esc(r.albumartist)}}` : ""}}</div>` : ""}}
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:5px">
             <button type="button" class="btn btn-sm" onclick="applyMBFromDialog(${{i}})">Use</button>
+            ${{r.id ? `<a href="https://musicbrainz.org/recording/${{esc(r.id)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open ↗</a>` : ""}}
             ${{artUrl ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(artUrl)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
           </div>
           <div class="hint mono">MBID: ${{esc(r.id)}}</div>
@@ -3979,7 +3983,7 @@ function discogsSearch() {{
             <button type="button" class="btn btn-sm" onclick="discogsUse(${{i}})">Use + Tracklist</button>
             ${{r.uri ? `<a href="${{esc(r.uri)}}" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open \u2197</a>` : ""}}
             ${{(r.cover_image||r.thumb) ? `<button type="button" class="btn btn-sm btn-outline" onclick='copyToClipboard(${{JSON.stringify(r.cover_image||r.thumb)}},this)' title="Copy full-size cover art URL to clipboard">&#128203; Art URL</button>` : ""}}
-            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" title="Click to enlarge" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="display:inline-block;text-align:center;line-height:1.2;vertical-align:middle">'+'<img src="'+esc(r.thumb)+'" style="max-height:50px;border-radius:6px;cursor:pointer;display:block" onclick="showImageModal('+inlineJsString(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" title="Click to enlarge" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
           </div>
         </div>`).join("");
     }}
@@ -4048,7 +4052,7 @@ function webSearch(){{
           const i = window._webResults.length;
           window._webResults.push(r);
           return `<div class="result-item">
-            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+JSON.stringify(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
+            ${{r.thumb ? ('<div style="float:right;margin-left:8px;text-align:center;line-height:1.2">'+'<img src="'+esc(r.thumb)+'" style="max-height:52px;max-width:52px;border-radius:4px;object-fit:cover;display:block;cursor:pointer" onerror="this.parentNode.style.display=\\'none\\'" loading="lazy" onclick="showImageModal('+inlineJsString(r.cover_image || r.thumb)+')" data-full="'+esc(r.cover_image || r.thumb)+'" onload="onResultThumbLoad(this,this.dataset.full||this.src)">'+'<span style="font-size:.6rem;color:var(--muted)"></span></div>') : ""}}
             <strong>${{esc(r.title||"")}}</strong>${{r.artist ? ` \u2014 ${{esc(r.artist)}}` : ""}}
             ${{r.label ? `<div class="hint">Label: ${{esc(r.label)}}</div>` : ""}}
             ${{r.released ? `<div class="hint">Released: ${{esc(r.released)}}</div>` : ""}}
@@ -4254,10 +4258,6 @@ document.getElementById("sList").addEventListener("dblclick", function(e){{
 
 document.getElementById("tagForm").addEventListener("submit", async function(e){{
   e.preventDefault();
-  if(!validateBeforeSave()) {{
-    showToast("Please fill the required fields before saving.", "error");
-    return;
-  }}
   const fd = new FormData(e.target);
   if(e.submitter && e.submitter.name) fd.set(e.submitter.name, e.submitter.value);
   try {{
@@ -4295,6 +4295,9 @@ document.getElementById("tagForm").addEventListener("submit", async function(e){
           if(artPrev2) artPrev2.style.display = "block";
         }}
       }}
+      // Refresh browse/search lists so saved tags are immediately visible.
+      await loadDir();
+      await doSearch();
     }} else {{
       showModal(`<div style="color:#991b1b;font-size:1.1rem;font-weight:700;margin-bottom:12px">Error</div><div>${{esc(data.error || "Unknown error")}}</div>`);
       showToast(data.error || "Save failed", "error");
@@ -4330,14 +4333,11 @@ const _coverDimCache = new Map();
 
 function onResultThumbLoad(img, fullSrc) {{
   const d = img ? img.nextElementSibling : null;
-  if(d && img && img.naturalWidth && img.naturalHeight) d.textContent = img.naturalWidth + "×" + img.naturalHeight + " thumb";
   const full = String(fullSrc || "").trim();
   if(!d || !/^https?:\/\//i.test(full)) return;
   const cached = _coverDimCache.get(full);
   if(cached) {{
-    d.textContent = (img.naturalWidth && img.naturalHeight)
-      ? (img.naturalWidth + "×" + img.naturalHeight + " thumb · " + cached.width + "×" + cached.height + " full")
-      : (cached.width + "×" + cached.height + " full");
+    d.textContent = cached.width + "×" + cached.height;
     return;
   }}
   fetch(`/api/url_dim?url=${{encodeURIComponent(full)}}`)
@@ -4345,10 +4345,7 @@ function onResultThumbLoad(img, fullSrc) {{
     .then(data => {{
       if(!data || !data.width || !data.height) return;
       _coverDimCache.set(full, {{ width: data.width, height: data.height }});
-      const thumbTxt = (img && img.naturalWidth && img.naturalHeight)
-        ? (img.naturalWidth + "×" + img.naturalHeight + " thumb · ")
-        : "";
-      d.textContent = thumbTxt + data.width + "×" + data.height + " full";
+      d.textContent = data.width + "×" + data.height;
     }})
     .catch(() => {{}});
 }}
