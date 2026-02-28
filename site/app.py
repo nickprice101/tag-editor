@@ -1435,6 +1435,17 @@ def parse_jsonld(html: str):
     return None
 
 
+def _jsonld_additional_property_value(node: dict, prop_name: str):
+    """Return `additionalProperty[].value` for `name == prop_name` from JSON-LD."""
+    props = node.get("additionalProperty") if isinstance(node, dict) else None
+    if not isinstance(props, list):
+        return ""
+    for prop in props:
+        if isinstance(prop, dict) and str(prop.get("name") or "").strip().lower() == prop_name.lower():
+            return prop.get("value")
+    return ""
+
+
 def _bandcamp_extract_publisher(jsonld: dict) -> str:
     """Extract publisher/label from Bandcamp MusicRecording JSON-LD."""
     album = jsonld.get("inAlbum") if isinstance(jsonld, dict) else None
@@ -1596,6 +1607,10 @@ def api_parse_url():
                     fields["genre"] = fields.get("genre") or cleaned.split("/")[0].strip()
                     if fields.get("genre"):
                         break
+
+            tracknum = _jsonld_additional_property_value(j, "tracknum")
+            if tracknum != "" and tracknum is not None:
+                fields["track"] = str(tracknum).strip()
 
         # Bandcamp: look for og tags
         og_title = soup.find("meta", property="og:title")

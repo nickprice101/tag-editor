@@ -157,6 +157,7 @@ def test_parse_url_extracts_bandcamp_musicrecording_jsonld_fields(monkeypatch):
       <script type="application/ld+json">
       {
         "@type": "MusicRecording",
+        "additionalProperty": [{"@type": "PropertyValue", "name": "tracknum", "value": 3}],
         "name": "Dumpalltheguns (Jitwam Remix)",
         "datePublished": "08 Mar 2024 00:00:00 GMT",
         "byArtist": {"@type": "MusicGroup", "name": "Adi Oasis"},
@@ -194,3 +195,4 @@ def test_parse_url_extracts_bandcamp_musicrecording_jsonld_fields(monkeypatch):
     assert payload["fields"]["publisher"] == "Unity Records"
     assert payload["fields"]["artist"] == "Adi Oasis"
     assert payload["fields"]["genre"] == "R&B"
+    assert payload["fields"]["track"] == "3"
