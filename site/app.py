@@ -3924,7 +3924,8 @@ const TAG_FIELDS = ["title","artist","album","albumartist","involved_people_list
 
 function applyAutoPopulatedTagDefaults() {{
   const artist = getField("artist").trim();
-  const albumArtist = getField("albumartist").trim();
+  const album = getField("album").trim();
+  let albumArtist = getField("albumartist").trim();
   const involvedPeople = getField("involved_people_list").trim();
   const artistSort = getField("artist_sort").trim();
   const albumArtistSort = getField("albumartist_sort").trim();
@@ -3932,6 +3933,11 @@ function applyAutoPopulatedTagDefaults() {{
   const yearVal = getField("year").trim();
   const originalYear = getField("original_year").trim();
   const trackVal = getField("track").trim();
+
+  if(!album && artist && albumArtist.toLowerCase() === "various artists") {{
+    setField("albumartist", artist);
+    albumArtist = artist;
+  }}
 
   if(artist && !involvedPeople) setField("involved_people_list", artist);
   if(artist && !albumArtist) setField("albumartist", artist);
