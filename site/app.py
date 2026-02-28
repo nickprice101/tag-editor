@@ -1434,6 +1434,50 @@ def parse_jsonld(html: str):
             continue
     return None
 
+
+def _jsonld_additional_property_value(node: dict, prop_name: str):
+    """Return `additionalProperty[].value` for `name == prop_name` from JSON-LD."""
+    props = node.get("additionalProperty") if isinstance(node, dict) else None
+    if not isinstance(props, list):
+        return ""
+    for prop in props:
+        if isinstance(prop, dict) and str(prop.get("name") or "").strip().lower() == prop_name.lower():
+            return prop.get("value")
+    return ""
+
+
+def _bandcamp_extract_publisher(jsonld: dict) -> str:
+    """Extract publisher/label from Bandcamp MusicRecording JSON-LD."""
+    album = jsonld.get("inAlbum") if isinstance(jsonld, dict) else None
+    releases = album.get("albumRelease") if isinstance(album, dict) else None
+    if isinstance(releases, list):
+        for rel in releases:
+            if not isinstance(rel, dict):
+                continue
+            label = rel.get("recordLabel")
+            if isinstance(label, dict) and label.get("name"):
+                return str(label.get("name")).strip()
+    pub = jsonld.get("publisher") if isinstance(jsonld, dict) else None
+    if isinstance(pub, dict):
+        return str(pub.get("name") or "").strip()
+    return ""
+
+
+def _coerce_iso_date(raw: str) -> str:
+    """Normalize common store date strings to YYYY-MM-DD when possible."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        return m.group(1)
+    for fmt in ("%d %b %Y %H:%M:%S GMT", "%d %b %Y", "%Y/%m/%d"):
+        try:
+            return dt_datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
 @app.route("/api/parse_url", methods=["GET"])
 def api_parse_url():
     """Best-effort parsing for Beatport, Bandcamp, Juno, Traxsource URLs."""
@@ -1522,6 +1566,52 @@ def api_parse_url():
     # 2) Site-specific tweaks
 
     if "bandcamp.com" in host:
+        if isinstance(j, dict):
+            album = j.get("inAlbum")
+            if isinstance(album, dict):
+                fields["album"] = str(album.get("name") or "").strip() or fields.get("album", "")
+
+            # Prefer explicit album art from release image array/string, then generic image.
+            album_releases = album.get("albumRelease") if isinstance(album, dict) else None
+            if isinstance(album_releases, list):
+                for rel in album_releases:
+                    if not isinstance(rel, dict):
+                        continue
+                    rel_image = rel.get("image")
+                    if isinstance(rel_image, list) and rel_image:
+                        fields["art_url"] = fields.get("art_url") or str(rel_image[0]).strip()
+                        break
+                    if isinstance(rel_image, str) and rel_image.strip():
+                        fields["art_url"] = fields.get("art_url") or rel_image.strip()
+                        break
+
+            pub = _bandcamp_extract_publisher(j)
+            if pub:
+                fields["publisher"] = fields.get("publisher") or pub
+
+            dp = j.get("datePublished") or ""
+            iso_date = _coerce_iso_date(str(dp))
+            if iso_date:
+                fields["date"] = iso_date
+                if len(iso_date) >= 4 and iso_date[:4].isdigit():
+                    fields["year"] = iso_date[:4]
+
+            keywords = j.get("keywords")
+            if isinstance(keywords, list):
+                for kw in keywords:
+                    if not isinstance(kw, str):
+                        continue
+                    cleaned = kw.strip()
+                    if not cleaned:
+                        continue
+                    fields["genre"] = fields.get("genre") or cleaned.split("/")[0].strip()
+                    if fields.get("genre"):
+                        break
+
+            tracknum = _jsonld_additional_property_value(j, "tracknum")
+            if tracknum != "" and tracknum is not None:
+                fields["track"] = str(tracknum).strip()
+
         # Bandcamp: look for og tags
         og_title = soup.find("meta", property="og:title")
         og_img = soup.find("meta", property="og:image")
