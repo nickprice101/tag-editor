@@ -1450,20 +1450,49 @@ def api_parse_url():
         return jsonify({"error": "This looks like a search page URL, not a direct track/product link. Open it manually instead."}), 400
 
     host = parsed_u.netloc.lower()
-    get_fn = bandcamp_get if "bandcamp.com" in host else http_get
+    is_bandcamp = "bandcamp.com" in host
+    get_fn = bandcamp_get if is_bandcamp else http_get
+    html = ""
+    fetch_exc = None
     try:
         r = get_fn(url, timeout=25)
         r.raise_for_status()
+        html = r.text
     except requests.RequestException as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
+        fetch_exc = exc
+
+    if fetch_exc and is_bandcamp and HEADLESS_ENABLED:
+        try:
+            html = _headless_get_html(url, HEADLESS_TIMEOUT_SECS)
+            fetch_exc = None
+        except Exception as hl_exc:
+            status = getattr(getattr(fetch_exc, "response", None), "status_code", None)
+            if not isinstance(status, int):
+                status = 502
+            return jsonify({
+                "error": (
+                    f"Unable to fetch URL ({status}) and headless fallback failed. "
+                    "The source may be blocking this request; open manually and copy fields."
+                ),
+                "details": str(fetch_exc),
+                "headless_details": str(hl_exc),
+            }), status
+
+    if fetch_exc:
+        status = getattr(getattr(fetch_exc, "response", None), "status_code", None)
         if not isinstance(status, int):
             status = 502
+        msg = (
+            f"Unable to fetch URL ({status}). The source may be blocking this request; "
+            "open manually and copy fields."
+        )
+        if is_bandcamp and not HEADLESS_ENABLED:
+            msg += " (Tip: enable HEADLESS_ENABLED=1 to allow browser fallback.)"
         return jsonify({
-            "error": f"Unable to fetch URL ({status}). The source may be blocking this request; open manually and copy fields.",
-            "details": str(exc),
+            "error": msg,
+            "details": str(fetch_exc),
         }), status
 
-    html = r.text
     soup = BeautifulSoup(html, "html.parser")
 
     fields = {}
