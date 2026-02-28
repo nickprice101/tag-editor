@@ -3426,6 +3426,7 @@ def ui_home():
         <div class="lookup-card">
           <input id="wsq" placeholder="Web search: e.g. Artist – Title"/>
           <button type="button" class="btn btn-outline" onclick="webSearch()">Web Search (Beatport / Traxsource / Bandcamp / Juno)</button>
+          <button type="button" class="btn btn-outline" onclick="googleImageSearchFromQuery()">Google Image Search (backup)</button>
           <div id="webSearchStatus" class="stream-status"></div>
           <div id="webSearchResults"></div>
           <hr class="section-sep"/>
@@ -3457,9 +3458,9 @@ def ui_home():
       <div class="lookup-card" style="margin-top:12px">
         <div class="gi-toolbar">
           <strong>Google Images</strong>
-          <span class="sub">Top 5 images (min 500×500) from the web-search query</span>
+          <span class="sub">Top 5 images (min 500×500) from the query above</span>
         </div>
-        <div id="googleImageResults" class="hint">Run Web Search to load Google image matches.</div>
+        <div id="googleImageResults" class="hint">Run Google Image Search (backup) when needed.</div>
       </div>
     </div>
 
@@ -3494,8 +3495,9 @@ def ui_home():
         </div>
         <div class="field-grid-3">
           <div class="field-group">
-            <label>Genre</label>
-            <input name="genre"/>
+            <label>Genre <button type="button" class="chip-btn" onclick="loadGenreOptions()">Load folder genres</button></label>
+            <input name="genre" list="genreFolderOptions" onfocus="loadGenreOptions()" placeholder="Pick from list or type custom"/>
+            <datalist id="genreFolderOptions"></datalist>
             <div id="genreSuggestions" style="margin-top:4px"></div>
           </div>
           <div class="field-group"><label>Track number <button type="button" class="chip-btn" onclick="normalizeTrackFormat()">Normalize track</button></label><input name="track" placeholder="1/0"/></div>
@@ -3630,6 +3632,7 @@ def ui_home():
 
 <script>
 let _baseline = {{}};
+let _genreFoldersCache = null;
 
 function ensureRevertUIForField(name) {{
   const el = document.querySelector(`[name="${{name}}"]`);
@@ -4367,6 +4370,7 @@ function renderGoogleImageResults(results){{
 async function googleImageSearch(q){{
   const el = document.getElementById("googleImageResults");
   if(!el) return;
+  if(!q){{ el.innerHTML = '<div class="hint">Enter a query first.</div>'; return; }}
   el.innerHTML = `<div class="hint">Searching Google Images…</div>`;
   try {{
     const res = await fetch(`/api/google_image_search?q=${{encodeURIComponent(q)}}`);
@@ -4381,12 +4385,17 @@ async function googleImageSearch(q){{
   }}
 }}
 
+function googleImageSearchFromQuery(){{
+  const wsq = document.getElementById("wsq");
+  const q = (wsq ? wsq.value.trim() : "") || ((getField("artist")+" "+getField("title")).trim()) || inferFromFilename();
+  googleImageSearch(q);
+}}
+
 function webSearch(){{
   const wsq = document.getElementById("wsq");
   const q = (wsq ? wsq.value.trim() : "") || ((getField("artist")+" "+getField("title")).trim()) || inferFromFilename();
   if(!q){{ document.getElementById("webSearchResults").textContent = "Enter a search query or load a file first."; return; }}
   document.getElementById("webSearchResults").innerHTML = "";
-  googleImageSearch(q);
   startStream("webSearch",
     `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}&date=${{encodeURIComponent(getField("date"))}}`,
     function(data){{
@@ -4742,6 +4751,25 @@ document.addEventListener("keydown", function(e){{
     else closeModal();
   }}
 }});
+
+async function loadGenreOptions() {{
+  const datalist = document.getElementById("genreFolderOptions");
+  const sugg = document.getElementById("genreSuggestions");
+  if(!datalist) return;
+  if(Array.isArray(_genreFoldersCache)) return;
+  if(sugg) sugg.innerHTML = '<span style="color:var(--muted);font-size:.82rem">Loading genre folders…</span>';
+  try {{
+    const res = await fetch("/api/genres");
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || `HTTP ${{res.status}}`);
+    _genreFoldersCache = Array.isArray(data.genres) ? data.genres : [];
+    datalist.innerHTML = _genreFoldersCache.map(g => `<option value="${{esc(g)}}"></option>`).join("");
+    if(sugg) sugg.innerHTML = '<span style="color:var(--muted);font-size:.82rem">Folder genres loaded. You can still type custom text.</span>';
+  }} catch(err) {{
+    _genreFoldersCache = [];
+    if(sugg) sugg.innerHTML = `<span style="color:#991b1b;font-size:.82rem">Could not load folder genres: ${{esc(err.message)}}. Free text still works.</span>`;
+  }}
+}}
 
 function copyToClipboard(text, btn) {{
   const prev = btn ? btn.textContent : "";
