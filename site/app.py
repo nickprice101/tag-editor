@@ -3726,7 +3726,10 @@ function normalizeTrackFormat() {{
   const parts = raw.split("/").map(p => p.trim());
   const left = parseInt(parts[0] || "", 10);
   const right = parseInt(parts[1] || "", 10);
-  if(Number.isFinite(left) && Number.isFinite(right)) setField("track", `${{left}}/${{right}}`);
+  if(Number.isFinite(left) && Number.isFinite(right)) {{
+    if(right <= 0) setField("track", "1/1");
+    else setField("track", `${{left}}/${{right}}`);
+  }}
   else if(Number.isFinite(left)) setField("track", `${{left}}/1`);
   else setField("track", "1/1");
 }}
@@ -3928,6 +3931,7 @@ function applyAutoPopulatedTagDefaults() {{
   const dateVal = getField("date").trim();
   const yearVal = getField("year").trim();
   const originalYear = getField("original_year").trim();
+  const trackVal = getField("track").trim();
 
   if(artist && !involvedPeople) setField("involved_people_list", artist);
   if(artist && !albumArtist) setField("albumartist", artist);
@@ -3939,7 +3943,10 @@ function applyAutoPopulatedTagDefaults() {{
     else if(artist) setField("albumartist_sort", artist);
   }}
 
-  if(!originalYear) {{
+  if(!trackVal || /^\d+\s*\/\s*0$/.test(trackVal)) setField("track", "1/1");
+
+  if(!originalYear || originalYear === "0000") {{
+    if(originalYear === "0000") setField("original_year", "");
     const dateYearMatch = dateVal.match(/^(\d{{4}})/);
     if(dateYearMatch) setField("original_year", dateYearMatch[1]);
     else if(yearVal) setField("original_year", yearVal);
@@ -3985,8 +3992,6 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   populateTagFieldsFromLoadedData(data);
   setBaseline(data);
   applyAutoPopulatedTagDefaults();
-  // Default missing track number to unsaved 1/1 so user reviews before save.
-  if(!getField("track").trim()) setField("track", "1/1");
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
