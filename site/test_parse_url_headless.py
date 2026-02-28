@@ -146,3 +146,51 @@ def test_parse_url_reports_when_bandcamp_headless_fallback_fails(monkeypatch):
     assert status == 403
     assert "headless fallback failed" in payload["error"].lower()
     assert "playwright unavailable" in payload["headless_details"]
+
+
+def test_parse_url_extracts_bandcamp_musicrecording_jsonld_fields(monkeypatch):
+    monkeypatch.setattr(app_mod, "request", _fake_request("https://adioasis.bandcamp.com/track/dumpalltheguns-jitwam-remix"))
+    monkeypatch.setattr(app_mod, "basic_auth_ok", lambda: True)
+
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {
+        "@type": "MusicRecording",
+        "name": "Dumpalltheguns (Jitwam Remix)",
+        "datePublished": "08 Mar 2024 00:00:00 GMT",
+        "byArtist": {"@type": "MusicGroup", "name": "Adi Oasis"},
+        "keywords": ["R&B/Soul", "disco"],
+        "inAlbum": {
+          "@type": "MusicAlbum",
+          "name": "Dumpallthguns",
+          "albumRelease": [{
+            "@type": ["MusicRelease", "Product"],
+            "image": ["https://f4.bcbits.com/img/a3661586943_10.jpg"],
+            "recordLabel": {"@type": "MusicGroup", "name": "Unity Records"}
+          }]
+        },
+        "image": "https://f4.bcbits.com/img/a3661586943_10.jpg"
+      }
+      </script>
+    </head><body></body></html>
+    """
+
+    class _Ok:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(app_mod, "bandcamp_get", lambda *a, **kw: _Ok())
+
+    payload = app_mod.api_parse_url()
+
+    assert payload["fields"]["album"] == "Dumpallthguns"
+    assert payload["fields"]["title"] == "Dumpalltheguns (Jitwam Remix)"
+    assert payload["fields"]["art_url"] == "https://f4.bcbits.com/img/a3661586943_10.jpg"
+    assert payload["fields"]["date"] == "2024-03-08"
+    assert payload["fields"]["year"] == "2024"
+    assert payload["fields"]["publisher"] == "Unity Records"
+    assert payload["fields"]["artist"] == "Adi Oasis"
+    assert payload["fields"]["genre"] == "R&B"
