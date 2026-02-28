@@ -215,6 +215,8 @@ def _create_session(paths: list, active_index: int = 0) -> dict:
         "id": secrets.token_urlsafe(16),
         "queue": queue,
         "active_index": active_index,
+        "playing": False,
+        "position_ms": 0,
         "created_at": now_ts,
         "updated_at": now_ts,
     }
@@ -236,6 +238,84 @@ def _get_session_or_404(session_id: str) -> dict:
             "id": sess["id"],
             "queue": list(sess["queue"]),
             "active_index": int(sess["active_index"]),
+            "playing": bool(sess.get("playing", False)),
+            "position_ms": int(sess.get("position_ms", 0)),
+            "created_at": int(sess["created_at"]),
+            "updated_at": int(sess["updated_at"]),
+        }
+
+
+def _replace_session_queue(session_id: str, paths: list, active_index: int | None = None) -> dict:
+    if not paths:
+        raise ValueError("Session queue cannot be empty.")
+    queue = [safe_path(p) for p in paths]
+    with _session_lock:
+        now_ts = int(time.time())
+        _session_cleanup(now_ts)
+        sess = _sessions.get(session_id)
+        if not sess:
+            raise ValueError("Session not found.")
+        if active_index is None:
+            active_index = 0
+        if active_index < 0 or active_index >= len(queue):
+            active_index = 0
+        sess["queue"] = queue
+        sess["active_index"] = active_index
+        sess["position_ms"] = 0
+        sess["updated_at"] = now_ts
+        return {
+            "id": sess["id"],
+            "queue": list(sess["queue"]),
+            "active_index": int(sess["active_index"]),
+            "playing": bool(sess.get("playing", False)),
+            "position_ms": int(sess.get("position_ms", 0)),
+            "created_at": int(sess["created_at"]),
+            "updated_at": int(sess["updated_at"]),
+        }
+
+
+def _apply_session_control(session_id: str, action: str, position_ms: int | None = None) -> dict:
+    action = (action or "").strip().lower()
+    valid = {"play", "pause", "seek", "next", "previous"}
+    if action not in valid:
+        raise ValueError("Invalid control action.")
+    with _session_lock:
+        now_ts = int(time.time())
+        _session_cleanup(now_ts)
+        sess = _sessions.get(session_id)
+        if not sess:
+            raise ValueError("Session not found.")
+
+        queue = sess["queue"]
+        idx = int(sess.get("active_index", 0))
+
+        if action == "play":
+            sess["playing"] = True
+        elif action == "pause":
+            sess["playing"] = False
+        elif action == "seek":
+            if position_ms is None:
+                raise ValueError("position_ms is required for seek.")
+            sess["position_ms"] = max(0, int(position_ms))
+        elif action == "next":
+            if idx < len(queue) - 1:
+                sess["active_index"] = idx + 1
+                sess["position_ms"] = 0
+        elif action == "previous":
+            if idx > 0:
+                sess["active_index"] = idx - 1
+                sess["position_ms"] = 0
+
+        sess["updated_at"] = now_ts
+        current_idx = int(sess["active_index"])
+        active_track = sess["queue"][current_idx]
+        return {
+            "id": sess["id"],
+            "queue": list(sess["queue"]),
+            "active_index": current_idx,
+            "active_track": active_track,
+            "playing": bool(sess.get("playing", False)),
+            "position_ms": int(sess.get("position_ms", 0)),
             "created_at": int(sess["created_at"]),
             "updated_at": int(sess["updated_at"]),
         }
@@ -1117,6 +1197,8 @@ def android_session_get():
             "active_track": active_track,
             "queue": sess["queue"],
             "queue_count": len(sess["queue"]),
+            "playing": sess.get("playing", False),
+            "position_ms": sess.get("position_ms", 0),
             "updated_at": sess["updated_at"],
         })
     except Exception as e:
@@ -1141,6 +1223,62 @@ def android_stream_sign():
             "stream_url": signed["url"],
             "expires": signed["expires"],
             "signature": signed["sig"],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/android/session_control.php", methods=["POST", "GET"])
+def android_session_control():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        payload = request.get_json(silent=True) or {}
+        session_id = (payload.get("session_id") or request.values.get("session_id") or "").strip()
+        action = payload.get("action") or request.values.get("action")
+        raw_position = payload.get("position_ms", request.values.get("position_ms"))
+        position_ms = int(raw_position) if raw_position is not None and raw_position != "" else None
+        sess = _apply_session_control(session_id, action, position_ms=position_ms)
+        return jsonify({
+            "session_id": sess["id"],
+            "action": action,
+            "active_index": sess["active_index"],
+            "active_track": sess["active_track"],
+            "queue_count": len(sess["queue"]),
+            "playing": sess["playing"],
+            "position_ms": sess["position_ms"],
+            "updated_at": sess["updated_at"],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/android/session_queue_replace.php", methods=["POST", "GET"])
+def android_session_queue_replace():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        payload = request.get_json(silent=True) or {}
+        session_id = (payload.get("session_id") or request.values.get("session_id") or "").strip()
+        paths = payload.get("paths") or request.values.getlist("paths")
+        if not paths and payload.get("queue"):
+            paths = [item.get("path") for item in payload.get("queue") if item.get("path")]
+        if isinstance(paths, str):
+            paths = [paths]
+        raw_active = payload.get("active_index", request.values.get("active_index"))
+        active_index = int(raw_active) if raw_active is not None and raw_active != "" else None
+
+        sess = _replace_session_queue(session_id, paths, active_index=active_index)
+        active_track = sess["queue"][sess["active_index"]]
+        return jsonify({
+            "session_id": sess["id"],
+            "active_index": sess["active_index"],
+            "active_track": active_track,
+            "queue": sess["queue"],
+            "queue_count": len(sess["queue"]),
+            "playing": sess["playing"],
+            "position_ms": sess["position_ms"],
+            "updated_at": sess["updated_at"],
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
