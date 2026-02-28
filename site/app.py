@@ -263,6 +263,91 @@ def _bandcamp_thumb_to_full(url: str) -> str:
     return re.sub(r"_(?:\d+)\.jpg$", "_16.jpg", url)
 
 
+def _google_image_search(query: str, max_results: int = 5,
+                         min_width: int = 500, min_height: int = 500) -> list:
+    """Best-effort Google Images lookup returning full image URLs and dimensions."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    if not _PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError("Playwright not installed; cannot run Google image search")
+
+    out: list = []
+    seen: set = set()
+    with _sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+                viewport={"width": 1600, "height": 1200},
+            )
+            page = ctx.new_page()
+            url = f"https://www.google.com/search?tbm=isch&hl=en&q={requests.utils.quote(q, safe='')}"
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(1200)
+            thumbs = page.locator("img")
+            total = min(thumbs.count(), 40)
+            for i in range(total):
+                if len(out) >= max_results:
+                    break
+                t = thumbs.nth(i)
+                try:
+                    src = (t.get_attribute("src") or "").strip()
+                    if not src.startswith("http"):
+                        continue
+                    t.scroll_into_view_if_needed(timeout=1500)
+                    t.click(timeout=1500)
+                    page.wait_for_timeout(350)
+                except Exception:
+                    continue
+
+                candidates = page.evaluate("""
+                  () => Array.from(document.querySelectorAll('img')).map(img => ({
+                    src: img.currentSrc || img.src || '',
+                    alt: img.alt || '',
+                    w: img.naturalWidth || 0,
+                    h: img.naturalHeight || 0,
+                  }))
+                """) or []
+                best = None
+                best_area = 0
+                for c in candidates:
+                    u = str(c.get("src") or "").strip()
+                    w = int(c.get("w") or 0)
+                    h = int(c.get("h") or 0)
+                    if not u.startswith("http"):
+                        continue
+                    if "gstatic.com" in u or "googleusercontent.com" in u or "encrypted-tbn" in u:
+                        continue
+                    if w < min_width or h < min_height:
+                        continue
+                    area = w * h
+                    if area > best_area:
+                        best = c
+                        best_area = area
+                if not best:
+                    continue
+                art_url = str(best.get("src") or "").strip()
+                if art_url in seen:
+                    continue
+                seen.add(art_url)
+                out.append({
+                    "title": (best.get("alt") or t.get_attribute("alt") or "Image").strip() or "Image",
+                    "thumb": src,
+                    "art_url": art_url,
+                    "width": int(best.get("w") or 0),
+                    "height": int(best.get("h") or 0),
+                    "source": "Google Images",
+                })
+        finally:
+            browser.close()
+    return out[:max_results]
+
+
 def _should_retry_without_remix(retry_meaningful: bool, retry_q_out: str, norm_q_out: str,
                                 first_pass_best_score: float, first_pass_hit_count: int) -> bool:
     """Decide whether the remix-stripped retry search should run.
@@ -2513,6 +2598,20 @@ def api_web_search_stream():
 
     return sse_response(generate())
 
+
+@app.route("/api/google_image_search", methods=["GET"])
+def api_google_image_search():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "Provide a query."}), 400
+    try:
+        results = _google_image_search(q, max_results=5, min_width=500, min_height=500)
+        return jsonify({"results": results})
+    except Exception as exc:
+        return jsonify({"error": f"Google image search failed: {str(exc)[:200]}"}), 500
+
 # ----- SSE streaming helpers -----
 _MAX_SSE_LOG = 3000  # max chars for log/error messages (truncated with ellipsis if exceeded)
 _MAX_FIELD_LEN = 500  # max chars per string field before JSON encoding to prevent huge payloads
@@ -3235,6 +3334,11 @@ def ui_home():
     .picker-list {{ max-height: 300px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; margin-top: 8px; }}
     .picker-item {{ padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: .86rem; }}
     .picker-item:hover {{ background: #fff0f5; }}
+    .gi-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:8px; }}
+    .gi-row {{ display:flex; gap:10px; overflow-x:auto; padding-bottom:4px; }}
+    .gi-card {{ min-width:190px; max-width:190px; border:1px solid var(--border); border-radius:8px; background:#fff; padding:8px; }}
+    .gi-thumb {{ width:100%; height:200px; object-fit:cover; border-radius:6px; cursor:pointer; background:#f3f4f6; display:block; }}
+    .gi-meta {{ font-size:.74rem; color:var(--muted); margin:6px 0; min-height:18px; }}
   </style>
 </head>
 <body>
@@ -3349,6 +3453,13 @@ def ui_home():
             <div id="discogsTracklist"></div>
           </div>
         </div>
+      </div>
+      <div class="lookup-card" style="margin-top:12px">
+        <div class="gi-toolbar">
+          <strong>Google Images</strong>
+          <span class="sub">Top 5 images (min 500×500) from the web-search query</span>
+        </div>
+        <div id="googleImageResults" class="hint">Run Web Search to load Google image matches.</div>
       </div>
     </div>
 
@@ -3882,6 +3993,7 @@ function clearLookupResults() {{
     "parseResults",
     "acoustidResults",
     "genreSuggestions",
+    "googleImageResults",
   ].forEach((id) => {{
     const el = document.getElementById(id);
     if(el) el.innerHTML = "";
@@ -4237,11 +4349,44 @@ async function parseUrl(){{
   el.innerHTML = noteHtml;
 }}
 
+function renderGoogleImageResults(results){{
+  const el = document.getElementById("googleImageResults");
+  if(!el) return;
+  if(!results || !results.length){{
+    el.innerHTML = `<div class="hint" style="font-style:italic">No Google image results met the 500×500 minimum.</div>`;
+    return;
+  }}
+  el.innerHTML = `<div class="gi-row">${{results.map((r) => `
+    <div class="gi-card">
+      <img src="${{esc(r.thumb || r.art_url)}}" class="gi-thumb" loading="lazy" onclick="showImageModal(${{inlineJsString(r.art_url || r.thumb)}})" alt="${{esc(r.title || 'Image')}}"/>
+      <div class="gi-meta">${{esc(String(r.width||0))}}×${{esc(String(r.height||0))}}</div>
+      <button type="button" class="btn btn-sm btn-outline" style="width:100%" onclick='copyToClipboard(${{JSON.stringify(r.art_url||"")}},this)'>&#128203; Art URL</button>
+    </div>`).join("")}}</div>`;
+}}
+
+async function googleImageSearch(q){{
+  const el = document.getElementById("googleImageResults");
+  if(!el) return;
+  el.innerHTML = `<div class="hint">Searching Google Images…</div>`;
+  try {{
+    const res = await fetch(`/api/google_image_search?q=${{encodeURIComponent(q)}}`);
+    const data = await res.json();
+    if(!res.ok){{
+      el.innerHTML = `<div class="hint" style="color:#991b1b">${{esc(data.error || "Google image search failed.")}}</div>`;
+      return;
+    }}
+    renderGoogleImageResults(data.results || []);
+  }} catch(err) {{
+    el.innerHTML = `<div class="hint" style="color:#991b1b">${{esc(err.message || "Google image search failed.")}}</div>`;
+  }}
+}}
+
 function webSearch(){{
   const wsq = document.getElementById("wsq");
   const q = (wsq ? wsq.value.trim() : "") || ((getField("artist")+" "+getField("title")).trim()) || inferFromFilename();
   if(!q){{ document.getElementById("webSearchResults").textContent = "Enter a search query or load a file first."; return; }}
   document.getElementById("webSearchResults").innerHTML = "";
+  googleImageSearch(q);
   startStream("webSearch",
     `/api/web_search_stream?q=${{encodeURIComponent(q)}}&artist=${{encodeURIComponent(getField("artist"))}}&title=${{encodeURIComponent(getField("title"))}}&year=${{encodeURIComponent(getField("year"))}}&date=${{encodeURIComponent(getField("date"))}}`,
     function(data){{
