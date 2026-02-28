@@ -3702,8 +3702,14 @@ function copyYearToDate() {{
 
 function copyDateToYear() {{
   const dateVal = getField("date").trim();
-  const m = dateVal.match(/(\d{4})/);
-  if(m) setField("year", m[1]);
+  if(!dateVal) return;
+  const m = dateVal.match(/^(\d{{4}})/);
+  if(m) {{
+    setField("year", m[1]);
+    return;
+  }}
+  const parts = dateVal.split("-");
+  if(parts[0] && /^\d{{4}}$/.test(parts[0])) setField("year", parts[0]);
 }}
 
 function copyYearToOriginalYear() {{
@@ -3720,7 +3726,10 @@ function normalizeTrackFormat() {{
   const parts = raw.split("/").map(p => p.trim());
   const left = parseInt(parts[0] || "", 10);
   const right = parseInt(parts[1] || "", 10);
-  if(Number.isFinite(left) && Number.isFinite(right)) setField("track", `${{left}}/${{right}}`);
+  if(Number.isFinite(left) && Number.isFinite(right)) {{
+    if(right <= 0) setField("track", "1/1");
+    else setField("track", `${{left}}/${{right}}`);
+  }}
   else if(Number.isFinite(left)) setField("track", `${{left}}/1`);
   else setField("track", "1/1");
 }}
@@ -3913,6 +3922,45 @@ const TAG_FIELDS = ["title","artist","album","albumartist","involved_people_list
   "year","original_year","track","publisher","comment","artist_sort","albumartist_sort",
   "catalog_number","bpm","art_url",...MB_FIELDS];
 
+function applyAutoPopulatedTagDefaults() {{
+  const artist = getField("artist").trim();
+  const albumArtist = getField("albumartist").trim();
+  const involvedPeople = getField("involved_people_list").trim();
+  const artistSort = getField("artist_sort").trim();
+  const albumArtistSort = getField("albumartist_sort").trim();
+  const dateVal = getField("date").trim();
+  const yearVal = getField("year").trim();
+  const originalYear = getField("original_year").trim();
+  const trackVal = getField("track").trim();
+
+  if(artist && !involvedPeople) setField("involved_people_list", artist);
+  if(artist && !albumArtist) setField("albumartist", artist);
+  if(artist && !artistSort) setField("artist_sort", artist);
+
+  const resolvedAlbumArtist = getField("albumartist").trim();
+  if(!albumArtistSort) {{
+    if(resolvedAlbumArtist) setField("albumartist_sort", resolvedAlbumArtist);
+    else if(artist) setField("albumartist_sort", artist);
+  }}
+
+  if(!trackVal || /^\d+\s*\/\s*0$/.test(trackVal)) setField("track", "1/1");
+
+  if(!originalYear || originalYear === "0000") {{
+    if(originalYear === "0000") setField("original_year", "");
+    const dateYearMatch = dateVal.match(/^(\d{{4}})/);
+    if(dateYearMatch) setField("original_year", dateYearMatch[1]);
+    else if(yearVal) setField("original_year", yearVal);
+  }}
+
+  // Always clear image URL input when loading/reverting track tags to avoid
+  // carrying legacy artwork URL values across tracks.
+  setField("art_url", "");
+}}
+
+function populateTagFieldsFromLoadedData(data) {{
+  for(const k of TAG_FIELDS) setField(k, data[k] !== undefined ? data[k] : "");
+}}
+
 async function loadTags(pathOrSeq = "", seq = 0){{
   // Backward compatibility: loadTags(seq) and loadTags(path, seq) are both supported.
   let p = "";
@@ -3941,21 +3989,9 @@ async function loadTags(pathOrSeq = "", seq = 0){{
     return false;
   }}
   if(!res.ok){{ msg.textContent = data.error || "Error"; return false; }}
-  for(const k of TAG_FIELDS){{
-    if(data[k] !== undefined) setField(k, data[k]);
-  }}
-  // Autopopulate year from date (only if year is blank)
-  const dv = getField("date"), yv = getField("year");
-  if(dv && !yv) setField("year", dv.substring(0,4));
-  // Autopopulate sort fields (only if blank)
-  const artV = getField("artist"), artSortV = getField("artist_sort");
-  if(artV && !artSortV) setField("artist_sort", sortName(artV));
-  const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
-  if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
-  // Set baseline from current field values (including autopopulated ones) so they don't appear dirty
-  setBaseline(null);
-  // Default missing track number to unsaved 1/1 so user reviews before save.
-  if(!getField("track").trim()) setField("track", "1/1");
+  populateTagFieldsFromLoadedData(data);
+  setBaseline(data);
+  applyAutoPopulatedTagDefaults();
   const fn = p.split("/").pop();
   const cf = document.getElementById("currentFile");
   if(cf) cf.textContent = `Editing: ${{fn}} \u2014 ${{(data.length_seconds||0).toFixed(1)}}s | ${{data.bitrate_kbps||0}} kbps | ${{data.sample_rate_hz||0}} Hz`;
@@ -4589,18 +4625,9 @@ async function revertTags() {{
   const res = await fetch(`/api/load?path=${{encodeURIComponent(p)}}`);
   const data = await res.json();
   if(!res.ok) return;
-  for(const k of TAG_FIELDS){{
-    if(data[k] !== undefined) setField(k, data[k]);
-  }}
-  // Autopopulate year from date (only if year is blank)
-  const dv = getField("date"), yv = getField("year");
-  if(dv && !yv) setField("year", dv.substring(0,4));
-  // Autopopulate sort fields (only if blank)
-  const artV = getField("artist"), artSortV = getField("artist_sort");
-  if(artV && !artSortV) setField("artist_sort", sortName(artV));
-  const aaSortV = getField("albumartist_sort"), aaV = getField("albumartist");
-  if(aaV && !aaSortV) setField("albumartist_sort", sortName(aaV));
-  setBaseline(null);
+  populateTagFieldsFromLoadedData(data);
+  setBaseline(data);
+  applyAutoPopulatedTagDefaults();
   clearLookupResults();
 }}
 
