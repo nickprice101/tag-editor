@@ -5,14 +5,11 @@ import json
 import shutil
 import threading
 import time
-import hashlib
-import hmac
-import secrets
 from datetime import date as dt_date, datetime as dt_datetime
 from io import BytesIO
 from difflib import SequenceMatcher
 from itertools import islice
-from urllib.parse import urlparse, parse_qs, unquote, quote, urlencode
+from urllib.parse import urlparse, parse_qs, unquote, quote
 
 import requests
 import acoustid
@@ -37,7 +34,6 @@ except ImportError:
 APP_USER = os.getenv("APP_USER", "")
 APP_PASS = os.getenv("APP_PASS", "")
 MUSIC_ROOT = os.getenv("MUSIC_ROOT", "/mnt/HD/HD_a2/Media/Music").rstrip("/")
-STREAM_SECRET = os.getenv("STREAM_SECRET", "").strip()
 
 _BROWSE_STARTUP_CANDIDATE = "/mnt/HD/HD_a2/Media/Music/Downloads/youtube-downloads"
 try:
@@ -97,11 +93,6 @@ MB_TXXX_FIELDS = [
 # Lightweight tag cache: (path, mtime) -> dict (max 2000 entries)
 _tag_cache: dict = {}
 _TAG_CACHE_MAX = 2000
-
-# Direct-stream session state (in-memory)
-_session_lock = threading.Lock()
-_sessions: dict = {}
-_SESSION_TTL_SECS = 60 * 60 * 24
 
 app = Flask(__name__)
 
@@ -183,153 +174,6 @@ def _similarity(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
-
-
-def _stream_secret() -> str:
-    return STREAM_SECRET or "dev-insecure-stream-secret"
-
-
-def _session_cleanup(now_ts: int):
-    stale = [
-        sid for sid, sess in _sessions.items()
-        if now_ts - int(sess.get("updated_at", now_ts)) > _SESSION_TTL_SECS
-    ]
-    for sid in stale:
-        _sessions.pop(sid, None)
-
-
-def _sign_stream_token(session_id: str, track_path: str, expires_ts: int) -> str:
-    payload = f"{session_id}\n{track_path}\n{expires_ts}".encode("utf-8")
-    return hmac.new(_stream_secret().encode("utf-8"), payload, hashlib.sha256).hexdigest()
-
-
-def _create_session(paths: list, active_index: int = 0) -> dict:
-    if not paths:
-        raise ValueError("Session queue cannot be empty.")
-    queue = [safe_path(p) for p in paths]
-    if active_index < 0 or active_index >= len(queue):
-        active_index = 0
-
-    now_ts = int(time.time())
-    sess = {
-        "id": secrets.token_urlsafe(16),
-        "queue": queue,
-        "active_index": active_index,
-        "playing": False,
-        "position_ms": 0,
-        "created_at": now_ts,
-        "updated_at": now_ts,
-    }
-    with _session_lock:
-        _session_cleanup(now_ts)
-        _sessions[sess["id"]] = sess
-    return sess
-
-
-def _get_session_or_404(session_id: str) -> dict:
-    with _session_lock:
-        now_ts = int(time.time())
-        _session_cleanup(now_ts)
-        sess = _sessions.get(session_id)
-        if not sess:
-            raise ValueError("Session not found.")
-        sess["updated_at"] = now_ts
-        return {
-            "id": sess["id"],
-            "queue": list(sess["queue"]),
-            "active_index": int(sess["active_index"]),
-            "playing": bool(sess.get("playing", False)),
-            "position_ms": int(sess.get("position_ms", 0)),
-            "created_at": int(sess["created_at"]),
-            "updated_at": int(sess["updated_at"]),
-        }
-
-
-def _replace_session_queue(session_id: str, paths: list, active_index: int | None = None) -> dict:
-    if not paths:
-        raise ValueError("Session queue cannot be empty.")
-    queue = [safe_path(p) for p in paths]
-    with _session_lock:
-        now_ts = int(time.time())
-        _session_cleanup(now_ts)
-        sess = _sessions.get(session_id)
-        if not sess:
-            raise ValueError("Session not found.")
-        if active_index is None:
-            active_index = 0
-        if active_index < 0 or active_index >= len(queue):
-            active_index = 0
-        sess["queue"] = queue
-        sess["active_index"] = active_index
-        sess["position_ms"] = 0
-        sess["updated_at"] = now_ts
-        return {
-            "id": sess["id"],
-            "queue": list(sess["queue"]),
-            "active_index": int(sess["active_index"]),
-            "playing": bool(sess.get("playing", False)),
-            "position_ms": int(sess.get("position_ms", 0)),
-            "created_at": int(sess["created_at"]),
-            "updated_at": int(sess["updated_at"]),
-        }
-
-
-def _apply_session_control(session_id: str, action: str, position_ms: int | None = None) -> dict:
-    action = (action or "").strip().lower()
-    valid = {"play", "pause", "seek", "next", "previous"}
-    if action not in valid:
-        raise ValueError("Invalid control action.")
-    with _session_lock:
-        now_ts = int(time.time())
-        _session_cleanup(now_ts)
-        sess = _sessions.get(session_id)
-        if not sess:
-            raise ValueError("Session not found.")
-
-        queue = sess["queue"]
-        idx = int(sess.get("active_index", 0))
-
-        if action == "play":
-            sess["playing"] = True
-        elif action == "pause":
-            sess["playing"] = False
-        elif action == "seek":
-            if position_ms is None:
-                raise ValueError("position_ms is required for seek.")
-            sess["position_ms"] = max(0, int(position_ms))
-        elif action == "next":
-            if idx < len(queue) - 1:
-                sess["active_index"] = idx + 1
-                sess["position_ms"] = 0
-        elif action == "previous":
-            if idx > 0:
-                sess["active_index"] = idx - 1
-                sess["position_ms"] = 0
-
-        sess["updated_at"] = now_ts
-        current_idx = int(sess["active_index"])
-        active_track = sess["queue"][current_idx]
-        return {
-            "id": sess["id"],
-            "queue": list(sess["queue"]),
-            "active_index": current_idx,
-            "active_track": active_track,
-            "playing": bool(sess.get("playing", False)),
-            "position_ms": int(sess.get("position_ms", 0)),
-            "created_at": int(sess["created_at"]),
-            "updated_at": int(sess["updated_at"]),
-        }
-
-
-def _build_signed_stream_url(session_id: str, track_path: str, ttl_secs: int = 600) -> dict:
-    expires_ts = int(time.time()) + max(30, min(ttl_secs, 3600))
-    sig = _sign_stream_token(session_id, track_path, expires_ts)
-    qs = urlencode({"session_id": session_id, "expires": str(expires_ts), "sig": sig})
-    return {
-        "url": f"/android/stream.php?{qs}",
-        "expires": expires_ts,
-        "sig": sig,
-    }
 
 # Patterns for query normalisation
 _BRACKET_RE = re.compile(r'\(([^)]*)\)|\[([^\]]*)\]')
@@ -1143,169 +987,6 @@ def api_list():
         return jsonify({"dir": safe_dir(d), "items": list_dir(d, q=q)})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
-@app.route("/android/library_list.php", methods=["GET"])
-def android_library_list():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        d = request.args.get("dir", MUSIC_ROOT)
-        q = request.args.get("q", "")
-        entries = list_dir(d, q=q)
-        tracks = [e for e in entries if e.get("type") == "file"]
-        return jsonify({"dir": safe_dir(d), "tracks": tracks, "count": len(tracks)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/session_create.php", methods=["POST", "GET"])
-def android_session_create():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        payload = request.get_json(silent=True) or {}
-        paths = payload.get("paths") or request.values.getlist("paths")
-        if not paths and payload.get("queue"):
-            paths = [item.get("path") for item in payload.get("queue") if item.get("path")]
-        if isinstance(paths, str):
-            paths = [paths]
-        active_index = int(payload.get("active_index", request.values.get("active_index", 0)) or 0)
-        sess = _create_session(paths, active_index=active_index)
-        active_track = sess["queue"][sess["active_index"]]
-        return jsonify({
-            "session_id": sess["id"],
-            "active_index": sess["active_index"],
-            "active_track": active_track,
-            "queue_count": len(sess["queue"]),
-            "created_at": sess["created_at"],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/session_get.php", methods=["GET"])
-def android_session_get():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        session_id = (request.args.get("session_id") or "").strip()
-        sess = _get_session_or_404(session_id)
-        active_track = sess["queue"][sess["active_index"]]
-        return jsonify({
-            "session_id": sess["id"],
-            "active_index": sess["active_index"],
-            "active_track": active_track,
-            "queue": sess["queue"],
-            "queue_count": len(sess["queue"]),
-            "playing": sess.get("playing", False),
-            "position_ms": sess.get("position_ms", 0),
-            "updated_at": sess["updated_at"],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/stream_sign.php", methods=["POST", "GET"])
-def android_stream_sign():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        payload = request.get_json(silent=True) or {}
-        session_id = (payload.get("session_id") or request.values.get("session_id") or "").strip()
-        ttl_secs = int(payload.get("ttl", request.values.get("ttl", 600)) or 600)
-        sess = _get_session_or_404(session_id)
-        active_track = sess["queue"][sess["active_index"]]
-        signed = _build_signed_stream_url(session_id, active_track, ttl_secs=ttl_secs)
-        return jsonify({
-            "session_id": session_id,
-            "active_index": sess["active_index"],
-            "active_track": active_track,
-            "stream_url": signed["url"],
-            "expires": signed["expires"],
-            "signature": signed["sig"],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/session_control.php", methods=["POST", "GET"])
-def android_session_control():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        payload = request.get_json(silent=True) or {}
-        session_id = (payload.get("session_id") or request.values.get("session_id") or "").strip()
-        action = payload.get("action") or request.values.get("action")
-        raw_position = payload.get("position_ms", request.values.get("position_ms"))
-        position_ms = int(raw_position) if raw_position is not None and raw_position != "" else None
-        sess = _apply_session_control(session_id, action, position_ms=position_ms)
-        return jsonify({
-            "session_id": sess["id"],
-            "action": action,
-            "active_index": sess["active_index"],
-            "active_track": sess["active_track"],
-            "queue_count": len(sess["queue"]),
-            "playing": sess["playing"],
-            "position_ms": sess["position_ms"],
-            "updated_at": sess["updated_at"],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/session_queue_replace.php", methods=["POST", "GET"])
-def android_session_queue_replace():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        payload = request.get_json(silent=True) or {}
-        session_id = (payload.get("session_id") or request.values.get("session_id") or "").strip()
-        paths = payload.get("paths") or request.values.getlist("paths")
-        if not paths and payload.get("queue"):
-            paths = [item.get("path") for item in payload.get("queue") if item.get("path")]
-        if isinstance(paths, str):
-            paths = [paths]
-        raw_active = payload.get("active_index", request.values.get("active_index"))
-        active_index = int(raw_active) if raw_active is not None and raw_active != "" else None
-
-        sess = _replace_session_queue(session_id, paths, active_index=active_index)
-        active_track = sess["queue"][sess["active_index"]]
-        return jsonify({
-            "session_id": sess["id"],
-            "active_index": sess["active_index"],
-            "active_track": active_track,
-            "queue": sess["queue"],
-            "queue_count": len(sess["queue"]),
-            "playing": sess["playing"],
-            "position_ms": sess["position_ms"],
-            "updated_at": sess["updated_at"],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/android/stream.php", methods=["GET"])
-def android_stream():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        session_id = (request.args.get("session_id") or "").strip()
-        expires = int((request.args.get("expires") or "0").strip() or 0)
-        sig = (request.args.get("sig") or "").strip()
-        if not session_id or not sig or expires <= 0:
-            return Response("Missing stream signature fields", status=401)
-        now_ts = int(time.time())
-        if expires < now_ts:
-            return Response("Signed URL expired", status=401)
-        sess = _get_session_or_404(session_id)
-        active_track = sess["queue"][sess["active_index"]]
-        expected = _sign_stream_token(session_id, active_track, expires)
-        if not hmac.compare_digest(sig, expected):
-            return Response("Invalid stream signature", status=401)
-        return _stream_audio_file(active_track)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
 
 @app.route("/api/ping", methods=["GET"])
 def api_ping():
@@ -3133,7 +2814,15 @@ def api_suggest_genre():
     matches = _map_tags_to_folders(tags_sorted, folders)
     return jsonify({"mb_tags": tags_sorted, "matches": matches, "genres": folders})
 
-def _stream_audio_file(path: str):
+@app.route("/api/audio", methods=["GET"])
+def api_audio():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    try:
+        path = safe_path(request.args.get("path", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
     file_size = os.path.getsize(path)
     range_header = request.headers.get("Range", "")
 
@@ -3184,6 +2873,7 @@ def _stream_audio_file(path: str):
         return Response(generate_partial(), status=206, mimetype="audio/mpeg",
                         headers=headers, direct_passthrough=True)
 
+    # Non-range: return full file
     def generate_full():
         with open(path, "rb") as f:
             while True:
@@ -3198,17 +2888,6 @@ def _stream_audio_file(path: str):
     }
     return Response(generate_full(), status=200, mimetype="audio/mpeg",
                     headers=headers, direct_passthrough=True)
-
-
-@app.route("/api/audio", methods=["GET"])
-def api_audio():
-    if not basic_auth_ok():
-        return require_basic_auth()
-    try:
-        path = safe_path(request.args.get("path", ""))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-    return _stream_audio_file(path)
 
 @app.route("/", methods=["GET"])
 def ui_home():
@@ -4069,28 +3748,6 @@ function openFile(p){{
   }}
 }}
 
-async function setSignedPlayerSource(path, audioEl) {{
-  const createRes = await fetch("/android/session_create.php", {{
-    method: "POST",
-    headers: {{"Content-Type": "application/json"}},
-    body: JSON.stringify({{paths: [path], active_index: 0}}),
-  }});
-  const createData = await createRes.json();
-  if(!createRes.ok) throw new Error(createData.error || "Unable to create playback session");
-
-  const signRes = await fetch("/android/stream_sign.php", {{
-    method: "POST",
-    headers: {{"Content-Type": "application/json"}},
-    body: JSON.stringify({{session_id: createData.session_id}}),
-  }});
-  const signData = await signRes.json();
-  if(!signRes.ok) throw new Error(signData.error || "Unable to sign stream URL");
-
-  audioEl.src = signData.stream_url;
-  audioEl.load();
-}}
-
-
 async function loadFileByPath(p){{
   const seq = ++_activeLoad.seq;
   _activeLoad.path = p;
@@ -4105,14 +3762,9 @@ async function loadFileByPath(p){{
   const audio = document.getElementById("audioPlayer");
   const playerFn = document.getElementById("playerFileName");
   if(audio){{
+    audio.src = `/api/audio?path=${{encodeURIComponent(p)}}`;
     audio.style.display = "";
-    try {{
-      await setSignedPlayerSource(p, audio);
-    }} catch(err) {{
-      console.warn("signed stream flow failed, falling back to /api/audio", err);
-      audio.src = `/api/audio?path=${{encodeURIComponent(p)}}`;
-      audio.load();
-    }}
+    audio.load();
   }}
   if(playerFn) playerFn.textContent = fn;
   // Scroll to Edit Tags section
