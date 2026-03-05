@@ -920,7 +920,9 @@ def read_tags_and_audio(mp3_path: str) -> dict:
 def archive_mp3(mp3_path: str) -> str:
     tags = ID3(mp3_path)
     genre = sanitize_component(get_text(tags, "TCON"))
-    albumartist = sanitize_component(get_text(tags, "TPE2") or get_text(tags, "TPE1"))
+    albumartist_sort = sanitize_component(
+        get_text(tags, "TSO2") or sort_name(get_text(tags, "TPE2") or get_text(tags, "TPE1"))
+    )
     album = sanitize_component(get_text(tags, "TALB"))
     title = sanitize_component(get_text(tags, "TIT2"))
     year = extract_year(tags)
@@ -930,10 +932,10 @@ def archive_mp3(mp3_path: str) -> str:
     track = track_raw.split("/")[0].strip() if track_raw else ""
     track = track.zfill(2) if track.isdigit() else (sanitize_component(track) if track else "00")
 
-    dest_dir = os.path.join(MUSIC_ROOT, genre, albumartist, album_dir)
+    dest_dir = os.path.join(MUSIC_ROOT, genre, albumartist_sort, album_dir)
     os.makedirs(dest_dir, exist_ok=True)
 
-    base = f"{track} - {title}.mp3"
+    base = f"{track} - {title} [{year}].mp3" if year else f"{track} - {title}.mp3"
     dest = os.path.join(dest_dir, base)
 
     if os.path.exists(dest) and os.path.realpath(dest) != os.path.realpath(mp3_path):
