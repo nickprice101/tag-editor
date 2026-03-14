@@ -2,6 +2,7 @@ import os
 import re
 import base64
 import json
+import queue
 import shutil
 import subprocess
 import threading
@@ -105,6 +106,10 @@ _script_job_state = {
     "last_error": "",
     "last_output": "",
 }
+_script_log_lock = threading.Lock()
+_script_log_lines = []
+_SCRIPT_LOG_MAX_LINES = 400
+_script_stream_subscribers = []
 
 app = Flask(__name__)
 
@@ -170,6 +175,38 @@ def _set_script_job_state(**updates) -> None:
         _script_job_state.update(updates)
 
 
+def _snapshot_script_logs() -> list:
+    with _script_log_lock:
+        return list(_script_log_lines)
+
+
+def _publish_script_stream_event(event: str, data) -> None:
+    payload = data if isinstance(data, str) else json.dumps(data)
+    with _script_log_lock:
+        subscribers = list(_script_stream_subscribers)
+    for sub in subscribers:
+        try:
+            sub.put_nowait((event, payload))
+        except Exception:
+            pass
+
+
+def _append_script_log(line: str) -> None:
+    text = (line or "").rstrip("\r\n")
+    if not text:
+        return
+    with _script_log_lock:
+        _script_log_lines.append(text)
+        if len(_script_log_lines) > _SCRIPT_LOG_MAX_LINES:
+            del _script_log_lines[:-_SCRIPT_LOG_MAX_LINES]
+    _publish_script_stream_event("log", text)
+
+
+def _clear_script_logs() -> None:
+    with _script_log_lock:
+        _script_log_lines.clear()
+
+
 def _run_yt_dlp_script() -> None:
     try:
         script_path = os.path.realpath(YT_DLP_SCRIPT)
@@ -178,15 +215,25 @@ def _run_yt_dlp_script() -> None:
         if not os.access(script_path, os.X_OK):
             raise PermissionError(f"Script is not executable: {script_path}")
 
-        proc = subprocess.run(
+        _append_script_log(f"Launching {script_path}")
+        proc = subprocess.Popen(
             [script_path],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            check=False,
+            bufsize=1,
         )
-        combined_output = "\n".join(
-            part.strip() for part in (proc.stdout or "", proc.stderr or "") if part and part.strip()
-        ).strip()
+        collected = []
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            collected.append(line)
+            _append_script_log(line)
+        proc.stdout.close()
+        proc.wait()
+        combined_output = "\n".join(collected).strip()
         _set_script_job_state(
             running=False,
             finished_at=dt_datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -194,6 +241,9 @@ def _run_yt_dlp_script() -> None:
             last_error="" if proc.returncode == 0 else (combined_output or f"Script exited with code {proc.returncode}"),
             last_output=combined_output[-4000:],
         )
+        _append_script_log(f"Script finished with exit code {proc.returncode}")
+        _publish_script_stream_event("state", _snapshot_script_job_state())
+        _publish_script_stream_event("done", json.dumps({"exit_code": proc.returncode}))
     except Exception as exc:
         _set_script_job_state(
             running=False,
@@ -202,6 +252,9 @@ def _run_yt_dlp_script() -> None:
             last_error=str(exc),
             last_output="",
         )
+        _append_script_log(f"Script failed to start: {exc}")
+        _publish_script_stream_event("state", _snapshot_script_job_state())
+        _publish_script_stream_event("done", json.dumps({"exit_code": -1}))
 
 # ---------------- Helpers ----------------
 def normalize_involved_people(s: str) -> str:
@@ -1166,6 +1219,37 @@ def yt_dlp_status():
     return jsonify(_snapshot_script_job_state())
 
 
+@app.route("/api/yt_dlp_stream", methods=["GET"])
+def yt_dlp_stream():
+    if not basic_auth_ok():
+        return require_basic_auth()
+
+    def generate():
+        q = queue.Queue()
+        with _script_log_lock:
+            _script_stream_subscribers.append(q)
+            backlog = list(_script_log_lines)
+        try:
+            yield sse_event("state", json.dumps(_snapshot_script_job_state()))
+            for line in backlog:
+                yield sse_event("log", line)
+            while True:
+                try:
+                    event, payload = q.get(timeout=15)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                yield sse_event(event, payload)
+                if event == "done":
+                    break
+        finally:
+            with _script_log_lock:
+                if q in _script_stream_subscribers:
+                    _script_stream_subscribers.remove(q)
+
+    return sse_response(generate())
+
+
 @app.route("/api/run_yt_dlp", methods=["POST"])
 def run_yt_dlp():
     if not basic_auth_ok():
@@ -1186,6 +1270,9 @@ def run_yt_dlp():
             "last_error": "",
             "last_output": "",
         })
+    _clear_script_logs()
+    _append_script_log("Job accepted. Waiting for script output...")
+    _publish_script_stream_event("state", _snapshot_script_job_state())
 
     thread = threading.Thread(target=_run_yt_dlp_script, daemon=True)
     thread.start()
@@ -3412,11 +3499,15 @@ def ui_home():
       min-width: 260px; text-align: right; font-size: .82rem; color: var(--muted);
     }}
     .server-action-status strong {{ color: var(--text); }}
-    .server-action-output {{
-      margin-top: 6px; white-space: pre-wrap; word-break: break-word;
-      max-width: 520px; max-height: 140px; overflow: auto;
-      padding: 10px 12px; border-radius: 10px; background: #fff8fb; border: 1px solid #ffd6e2;
+    .server-action-log {{
+      margin-top: 12px; min-width: min(100%, 520px); max-width: 520px; max-height: 220px;
+      overflow: auto; text-align: left; padding: 10px 12px; border-radius: 10px;
+      background: #fff8fb; border: 1px solid #ffd6e2;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .78rem;
+      line-height: 1.45; color: var(--text);
     }}
+    .server-action-log-line {{ white-space: pre-wrap; word-break: break-word; }}
+    .server-action-log-line + .server-action-log-line {{ margin-top: 4px; }}
     @media(max-width:700px) {{
       .server-action-footer {{ flex-direction: column; }}
       .server-action-status {{ min-width: 0; text-align: left; }}
@@ -3743,7 +3834,7 @@ def ui_home():
     <button type="button" id="runYtDlpLink" class="text-link-btn" onclick="triggerYtDlpRun()">Run import now</button>
     <div id="ytDlpStatusText" style="margin-top:6px">Checking status...</div>
     <div id="ytDlpStatusMeta" class="hint mono"></div>
-    <div id="ytDlpStatusOutput" class="server-action-output mono" style="display:none"></div>
+    <div id="ytDlpLogWindow" class="server-action-log" style="display:none"></div>
   </div>
 </div>
 
@@ -3790,7 +3881,7 @@ def ui_home():
 <script>
 let _baseline = {{}};
 let _genreFoldersCache = null;
-let _ytDlpPollTimer = null;
+let _ytDlpEventSource = null;
 
 function ensureRevertUIForField(name) {{
   const el = document.querySelector(`[name="${{name}}"]`);
@@ -4909,12 +5000,66 @@ function formatServerTime(text) {{
   return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
 }}
 
+function appendYtDlpLogLine(message) {{
+  const log = document.getElementById("ytDlpLogWindow");
+  if(!log) return;
+  const text = String(message || "").trim();
+  if(!text) return;
+  log.style.display = "block";
+  const line = document.createElement("div");
+  line.className = "server-action-log-line";
+  line.textContent = text;
+  log.appendChild(line);
+  while(log.childElementCount > 400) {{
+    log.removeChild(log.firstElementChild);
+  }}
+  log.scrollTop = log.scrollHeight;
+}}
+
+function resetYtDlpLogWindow() {{
+  const log = document.getElementById("ytDlpLogWindow");
+  if(!log) return;
+  log.innerHTML = "";
+  log.style.display = "none";
+}}
+
+function disconnectYtDlpStream() {{
+  if(_ytDlpEventSource) {{
+    try {{ _ytDlpEventSource.close(); }} catch (_) {{}}
+    _ytDlpEventSource = null;
+  }}
+}}
+
+function connectYtDlpStream(forceReset = false) {{
+  const log = document.getElementById("ytDlpLogWindow");
+  if(!log) return;
+  if(forceReset) resetYtDlpLogWindow();
+  if(_ytDlpEventSource) return;
+  const es = new EventSource("/api/yt_dlp_stream");
+  _ytDlpEventSource = es;
+  es.addEventListener("state", function(e) {{
+    try {{
+      renderYtDlpStatus(JSON.parse(e.data || "{{}}"));
+    }} catch(_) {{}}
+  }});
+  es.addEventListener("log", function(e) {{
+    appendYtDlpLogLine(e.data || "");
+  }});
+  es.addEventListener("done", function() {{
+    disconnectYtDlpStream();
+    void loadYtDlpStatus();
+  }});
+  es.onerror = function() {{
+    disconnectYtDlpStream();
+    appendYtDlpLogLine("Stream disconnected.");
+  }};
+}
+
 function renderYtDlpStatus(data) {{
   const link = document.getElementById("runYtDlpLink");
   const status = document.getElementById("ytDlpStatusText");
   const meta = document.getElementById("ytDlpStatusMeta");
-  const output = document.getElementById("ytDlpStatusOutput");
-  if(!link || !status || !meta || !output) return;
+  if(!link || !status || !meta) return;
 
   const running = !!(data && data.running);
   link.disabled = running;
@@ -4936,22 +5081,10 @@ function renderYtDlpStatus(data) {{
   if(started) details.push(`started ${{started}}`);
   if(finished) details.push(`finished ${{finished}}`);
   meta.textContent = details.join(" | ");
-
-  const message = String((data && (data.last_error || data.last_output)) || "").trim();
-  if(message) {{
-    output.style.display = "block";
-    output.textContent = message;
-  }} else {{
-    output.style.display = "none";
-    output.textContent = "";
-  }}
-
-  if(_ytDlpPollTimer) {{
-    clearTimeout(_ytDlpPollTimer);
-    _ytDlpPollTimer = null;
-  }}
   if(running) {{
-    _ytDlpPollTimer = setTimeout(loadYtDlpStatus, 3000);
+    connectYtDlpStream(false);
+  }} else {{
+    disconnectYtDlpStream();
   }}
 }}
 
@@ -4961,6 +5094,13 @@ async function loadYtDlpStatus() {{
     const data = await res.json();
     if(!res.ok) throw new Error(data.error || `HTTP ${{res.status}}`);
     renderYtDlpStatus(data);
+    if(!data.running) {{
+      const message = String((data.last_error || data.last_output) || "").trim();
+      if(message) {{
+        resetYtDlpLogWindow();
+        for (const line of message.split(/\r?\n/)) appendYtDlpLogLine(line);
+      }}
+    }}
   }} catch(err) {{
     renderYtDlpStatus({{ last_error: `Status unavailable: ${{err.message}}` }});
   }}
@@ -4971,6 +5111,8 @@ async function triggerYtDlpRun() {{
   if(link && link.disabled) return;
   try {{
     if(link) link.disabled = true;
+    resetYtDlpLogWindow();
+    connectYtDlpStream(false);
     const res = await fetch("/api/run_yt_dlp", {{ method: "POST" }});
     const data = await res.json();
     if(res.status === 202) {{
@@ -4983,7 +5125,9 @@ async function triggerYtDlpRun() {{
     renderYtDlpStatus(data.job || data);
   }} catch(err) {{
     showToast(`Could not start import: ${{err.message}}`, "error", 4200);
+    disconnectYtDlpStream();
     renderYtDlpStatus({{ last_error: `Start failed: ${{err.message}}` }});
+    appendYtDlpLogLine(`Start failed: ${{err.message}}`);
   }} finally {{
     const state = document.getElementById("ytDlpStatusText")?.textContent || "";
     if(link && !state.toLowerCase().includes("running")) link.disabled = false;
