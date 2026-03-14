@@ -626,6 +626,25 @@ def get_txxx(tags: ID3, desc: str) -> str:
             return str(t.text[0]).strip()
     return ""
 
+def _is_generic_albumartist(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {"various artists", "various", "va", "v/a"}
+
+def get_albumartist(tags: ID3) -> str:
+    primary = get_text(tags, "TPE2")
+    fallbacks = [
+        get_txxx(tags, "ALBUMARTIST"),
+        get_txxx(tags, "albumartist"),
+        get_txxx(tags, "Album Artist"),
+        get_txxx(tags, "musicbrainz_albumartist"),
+    ]
+    specific_fallback = next((value for value in fallbacks if value and not _is_generic_albumartist(value)), "")
+    if primary and not (_is_generic_albumartist(primary) and specific_fallback):
+        return primary
+    if specific_fallback:
+        return specific_fallback
+    return next((value for value in fallbacks if value), "")
+
 def set_txxx(tags: ID3, desc: str, value: str):
     value = (value or "").strip()
     if not value:
@@ -764,10 +783,14 @@ def upsert_id3(mp3_path: str, fields: dict):
     except ID3NoHeaderError:
         tags = ID3()
 
+    albumartist = (fields.get("albumartist") or "").strip()
+    if not albumartist:
+        albumartist = get_albumartist(tags)
+
     set_text_frame(tags, TIT2, fields.get("title"))
     set_text_frame(tags, TPE1, fields.get("artist"))
     set_text_frame(tags, TALB, fields.get("album"))
-    set_text_frame(tags, TPE2, fields.get("albumartist"))
+    set_text_frame(tags, TPE2, albumartist)
     set_text_frame(tags, TCON, fields.get("genre"))
     set_text_frame(tags, TRCK, fields.get("track"))
     set_text_frame(tags, TPUB, fields.get("publisher"))
@@ -889,7 +912,7 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "title": get_text(tags, "TIT2"),
         "artist": get_text(tags, "TPE1"),
         "album": get_text(tags, "TALB"),
-        "albumartist": get_text(tags, "TPE2"),
+        "albumartist": get_albumartist(tags),
         "genre": get_text(tags, "TCON"),
         "track": get_text(tags, "TRCK"),
         "publisher": get_text(tags, "TPUB"),
@@ -921,7 +944,7 @@ def archive_mp3(mp3_path: str) -> str:
     tags = ID3(mp3_path)
     genre = sanitize_component(get_text(tags, "TCON"))
     albumartist_sort = sanitize_component(
-        get_text(tags, "TSO2") or sort_name(get_text(tags, "TPE2") or get_text(tags, "TPE1"))
+        get_text(tags, "TSO2") or sort_name(get_albumartist(tags) or get_text(tags, "TPE1"))
     )
     album = sanitize_component(get_text(tags, "TALB"))
     title = sanitize_component(get_text(tags, "TIT2"))
