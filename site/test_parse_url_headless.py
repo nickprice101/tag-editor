@@ -1,5 +1,6 @@
 """Tests for /api/parse_url Bandcamp headless fallback behavior."""
 
+import importlib
 import os
 import sys
 import types
@@ -87,7 +88,8 @@ img_mod.Image = None
 sys.modules["PIL"] = pil_mod
 sys.modules["PIL.Image"] = img_mod
 
-import app as app_mod  # noqa: E402
+sys.modules.pop("app", None)
+app_mod = importlib.import_module("app")  # noqa: E402
 
 
 def _fake_request(url: str):
@@ -114,6 +116,7 @@ def test_parse_url_uses_headless_when_bandcamp_returns_403(monkeypatch):
             '<meta property="og:image" content="https://img.example/cover.jpg">'
         ),
     )
+    monkeypatch.setattr(app_mod, "jsonify", lambda payload: payload)
 
     payload = app_mod.api_parse_url()
 
@@ -140,6 +143,7 @@ def test_parse_url_reports_when_bandcamp_headless_fallback_fails(monkeypatch):
         raise RuntimeError("playwright unavailable")
 
     monkeypatch.setattr(app_mod, "_headless_get_html", _fail_headless)
+    monkeypatch.setattr(app_mod, "jsonify", lambda payload: payload)
 
     payload, status = app_mod.api_parse_url()
 
@@ -184,6 +188,7 @@ def test_parse_url_extracts_bandcamp_musicrecording_jsonld_fields(monkeypatch):
             return None
 
     monkeypatch.setattr(app_mod, "bandcamp_get", lambda *a, **kw: _Ok())
+    monkeypatch.setattr(app_mod, "jsonify", lambda payload: payload)
 
     payload = app_mod.api_parse_url()
 

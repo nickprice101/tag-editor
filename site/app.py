@@ -3,6 +3,7 @@ import re
 import base64
 import json
 import shutil
+import subprocess
 import threading
 import time
 from datetime import date as dt_date, datetime as dt_datetime
@@ -34,6 +35,7 @@ except ImportError:
 APP_USER = os.getenv("APP_USER", "")
 APP_PASS = os.getenv("APP_PASS", "")
 MUSIC_ROOT = os.getenv("MUSIC_ROOT", "/mnt/HD/HD_a2/Media/Music").rstrip("/")
+YT_DLP_SCRIPT = os.getenv("YT_DLP_SCRIPT", "/app/scripts/yt_dlp.sh").strip() or "/app/scripts/yt_dlp.sh"
 
 _BROWSE_STARTUP_CANDIDATE = "/mnt/HD/HD_a2/Media/Music/Downloads/youtube-downloads"
 try:
@@ -94,6 +96,16 @@ MB_TXXX_FIELDS = [
 _tag_cache: dict = {}
 _TAG_CACHE_MAX = 2000
 
+_script_job_lock = threading.Lock()
+_script_job_state = {
+    "running": False,
+    "started_at": "",
+    "finished_at": "",
+    "last_exit_code": None,
+    "last_error": "",
+    "last_output": "",
+}
+
 app = Flask(__name__)
 
 _TAB_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>
@@ -146,6 +158,50 @@ def safe_dir(d: str) -> str:
     if not os.path.isdir(real):
         raise ValueError("Directory does not exist.")
     return real
+
+
+def _snapshot_script_job_state() -> dict:
+    with _script_job_lock:
+        return dict(_script_job_state)
+
+
+def _set_script_job_state(**updates) -> None:
+    with _script_job_lock:
+        _script_job_state.update(updates)
+
+
+def _run_yt_dlp_script() -> None:
+    try:
+        script_path = os.path.realpath(YT_DLP_SCRIPT)
+        if not os.path.isfile(script_path):
+            raise FileNotFoundError(f"Script not found: {script_path}")
+        if not os.access(script_path, os.X_OK):
+            raise PermissionError(f"Script is not executable: {script_path}")
+
+        proc = subprocess.run(
+            [script_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        combined_output = "\n".join(
+            part.strip() for part in (proc.stdout or "", proc.stderr or "") if part and part.strip()
+        ).strip()
+        _set_script_job_state(
+            running=False,
+            finished_at=dt_datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            last_exit_code=proc.returncode,
+            last_error="" if proc.returncode == 0 else (combined_output or f"Script exited with code {proc.returncode}"),
+            last_output=combined_output[-4000:],
+        )
+    except Exception as exc:
+        _set_script_job_state(
+            running=False,
+            finished_at=dt_datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            last_exit_code=-1,
+            last_error=str(exc),
+            last_output="",
+        )
 
 # ---------------- Helpers ----------------
 def normalize_involved_people(s: str) -> str:
@@ -1101,6 +1157,44 @@ def api_list():
 @app.route("/api/ping", methods=["GET"])
 def api_ping():
     return jsonify({"ok": True})
+
+
+@app.route("/api/yt_dlp_status", methods=["GET"])
+def yt_dlp_status():
+    if not basic_auth_ok():
+        return require_basic_auth()
+    return jsonify(_snapshot_script_job_state())
+
+
+@app.route("/api/run_yt_dlp", methods=["POST"])
+def run_yt_dlp():
+    if not basic_auth_ok():
+        return require_basic_auth()
+
+    with _script_job_lock:
+        if _script_job_state.get("running"):
+            return jsonify({
+                "status": "busy",
+                "message": "The download job is already running.",
+                "job": dict(_script_job_state),
+            }), 409
+        _script_job_state.update({
+            "running": True,
+            "started_at": dt_datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "finished_at": "",
+            "last_exit_code": None,
+            "last_error": "",
+            "last_output": "",
+        })
+
+    thread = threading.Thread(target=_run_yt_dlp_script, daemon=True)
+    thread.start()
+    return jsonify({
+        "status": "started",
+        "message": "The download job has started.",
+        "job": _snapshot_script_job_state(),
+    }), 202
+
 
 @app.route("/api/search", methods=["GET"])
 def api_search():
@@ -3230,6 +3324,12 @@ def ui_home():
     .btn-sm {{ padding: 5px 10px; font-size: .8rem; }}
     .btn-outline {{ background: #fff; border: 1px solid var(--accent); color: var(--accent-strong); box-shadow: none; }}
     .btn-ghost {{ background: #fff; color: var(--text); border: 1px solid var(--border); box-shadow: none; }}
+    .text-link-btn {{
+      appearance: none; border: 0; background: none; padding: 0;
+      color: var(--accent-strong); font: inherit; font-weight: 700;
+      text-decoration: underline; cursor: pointer;
+    }}
+    .text-link-btn[disabled] {{ color: var(--muted); cursor: wait; text-decoration: none; }}
     .editor-main {{
       padding: 20px;
     }}
@@ -3303,6 +3403,24 @@ def ui_home():
     .file-title-tag {{ font-size: .82rem; color: var(--muted); margin-top: 1px; }}
     .file-footer {{ display: flex; gap: 8px; margin-top: 3px; font-size: .78rem; }}
     .genre-badge {{ background: #d1fae5; color: #065f46; border-radius: 999px; padding: 1px 7px; font-size: .75rem; font-weight: 600; }}
+    .server-action-footer {{
+      display: flex; gap: 16px; align-items: flex-start; justify-content: space-between;
+      margin-top: 18px; padding: 14px 16px;
+    }}
+    .server-action-footer .hint {{ margin: 4px 0 0; }}
+    .server-action-status {{
+      min-width: 260px; text-align: right; font-size: .82rem; color: var(--muted);
+    }}
+    .server-action-status strong {{ color: var(--text); }}
+    .server-action-output {{
+      margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+      max-width: 520px; max-height: 140px; overflow: auto;
+      padding: 10px 12px; border-radius: 10px; background: #fff8fb; border: 1px solid #ffd6e2;
+    }}
+    @media(max-width:700px) {{
+      .server-action-footer {{ flex-direction: column; }}
+      .server-action-status {{ min-width: 0; text-align: left; }}
+    }}
     .genre-missing {{ background: #fee2e2; color: #991b1b; border-radius: 999px; padding: 1px 7px; font-size: .75rem; font-weight: 600; }}
     .dir-item {{
       display: flex; align-items: center; gap: 8px; padding: 7px 10px;
@@ -3615,6 +3733,20 @@ def ui_home():
 </div>
 </div>
 
+<div class="card server-action-footer">
+  <div>
+    <div class="callout-title" style="margin-bottom:0">Server action</div>
+    <div style="font-weight:700;margin-top:6px">YouTube liked playlist import</div>
+    <div class="hint">Runs <span class="mono">{YT_DLP_SCRIPT}</span> on the server in the background.</div>
+  </div>
+  <div class="server-action-status">
+    <button type="button" id="runYtDlpLink" class="text-link-btn" onclick="triggerYtDlpRun()">Run import now</button>
+    <div id="ytDlpStatusText" style="margin-top:6px">Checking status...</div>
+    <div id="ytDlpStatusMeta" class="hint mono"></div>
+    <div id="ytDlpStatusOutput" class="server-action-output mono" style="display:none"></div>
+  </div>
+</div>
+
 <div id="resultModal">
   <div class="modal-inner">
     <div id="resultModalBody"></div>
@@ -3658,6 +3790,7 @@ def ui_home():
 <script>
 let _baseline = {{}};
 let _genreFoldersCache = null;
+let _ytDlpPollTimer = null;
 
 function ensureRevertUIForField(name) {{
   const el = document.querySelector(`[name="${{name}}"]`);
@@ -4769,6 +4902,94 @@ async function loadKeyStatus(){{
   }}
 }}
 
+function formatServerTime(text) {{
+  const raw = String(text || "").trim();
+  if(!raw) return "";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
+}}
+
+function renderYtDlpStatus(data) {{
+  const link = document.getElementById("runYtDlpLink");
+  const status = document.getElementById("ytDlpStatusText");
+  const meta = document.getElementById("ytDlpStatusMeta");
+  const output = document.getElementById("ytDlpStatusOutput");
+  if(!link || !status || !meta || !output) return;
+
+  const running = !!(data && data.running);
+  link.disabled = running;
+  link.textContent = running ? "Import running..." : "Run import now";
+
+  if(running) {{
+    status.innerHTML = "<strong>Running</strong>";
+  }} else if(data && data.last_exit_code === 0) {{
+    status.innerHTML = "<strong>Last run succeeded</strong>";
+  }} else if(data && data.last_exit_code !== null && data.last_exit_code !== undefined) {{
+    status.innerHTML = `<strong>Last run failed</strong> (exit ${{esc(String(data.last_exit_code))}})`;
+  }} else {{
+    status.innerHTML = "<strong>Idle</strong>";
+  }}
+
+  const details = [];
+  const started = formatServerTime(data && data.started_at);
+  const finished = formatServerTime(data && data.finished_at);
+  if(started) details.push(`started ${{started}}`);
+  if(finished) details.push(`finished ${{finished}}`);
+  meta.textContent = details.join(" | ");
+
+  const message = String((data && (data.last_error || data.last_output)) || "").trim();
+  if(message) {{
+    output.style.display = "block";
+    output.textContent = message;
+  }} else {{
+    output.style.display = "none";
+    output.textContent = "";
+  }}
+
+  if(_ytDlpPollTimer) {{
+    clearTimeout(_ytDlpPollTimer);
+    _ytDlpPollTimer = null;
+  }}
+  if(running) {{
+    _ytDlpPollTimer = setTimeout(loadYtDlpStatus, 3000);
+  }}
+}}
+
+async function loadYtDlpStatus() {{
+  try {{
+    const res = await fetch("/api/yt_dlp_status");
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || `HTTP ${{res.status}}`);
+    renderYtDlpStatus(data);
+  }} catch(err) {{
+    renderYtDlpStatus({{ last_error: `Status unavailable: ${{err.message}}` }});
+  }}
+}}
+
+async function triggerYtDlpRun() {{
+  const link = document.getElementById("runYtDlpLink");
+  if(link && link.disabled) return;
+  try {{
+    if(link) link.disabled = true;
+    const res = await fetch("/api/run_yt_dlp", {{ method: "POST" }});
+    const data = await res.json();
+    if(res.status === 202) {{
+      showToast("YouTube import started.", "success", 3200);
+    }} else if(res.status === 409) {{
+      showToast("Import is already running.", "info", 3200);
+    }} else if(!res.ok) {{
+      throw new Error(data.error || data.message || `HTTP ${{res.status}}`);
+    }}
+    renderYtDlpStatus(data.job || data);
+  }} catch(err) {{
+    showToast(`Could not start import: ${{err.message}}`, "error", 4200);
+    renderYtDlpStatus({{ last_error: `Start failed: ${{err.message}}` }});
+  }} finally {{
+    const state = document.getElementById("ytDlpStatusText")?.textContent || "";
+    if(link && !state.toLowerCase().includes("running")) link.disabled = false;
+  }}
+}}
+
 document.addEventListener("keydown", function(e){{
   if(e.key === "Escape") {{
     const mbDlg = document.getElementById("mbDialog");
@@ -4950,6 +5171,12 @@ function applyGenreSuggestion(genre) {{
     logClickDebug("init", "loadKeyStatus ok");
   }} catch(e) {{
     logClickDebug("init", "loadKeyStatus failed", {{ error: String(e) }});
+  }}
+  try {{
+    await loadYtDlpStatus();
+    logClickDebug("init", "loadYtDlpStatus ok");
+  }} catch(e) {{
+    logClickDebug("init", "loadYtDlpStatus failed", {{ error: String(e) }});
   }}
 }})();
 </script>

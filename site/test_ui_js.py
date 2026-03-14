@@ -14,9 +14,12 @@ This test:
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+
+import pytest
 
 APP_PY = os.path.join(os.path.dirname(__file__), "app.py")
 
@@ -52,8 +55,10 @@ def minimal_fstring_to_js(raw: str) -> str:
 
 def validate_js_syntax(js: str) -> None:
     """Run Node.js --check on a temporary file containing the JS."""
+    if shutil.which("node") is None:
+        pytest.skip("node is not available on PATH")
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".js", delete=False
+        mode="w", suffix=".js", delete=False, encoding="utf-8"
     ) as tmp:
         tmp.write(js)
         tmp_path = tmp.name
@@ -72,7 +77,7 @@ def validate_js_syntax(js: str) -> None:
 
 
 def test_app_inline_js_has_no_syntax_errors():
-    with open(APP_PY, "r") as f:
+    with open(APP_PY, "r", encoding="utf-8") as f:
         source = f.read()
     for js_raw in extract_script_blocks(source):
         js = minimal_fstring_to_js(js_raw)
