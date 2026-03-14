@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-WORKDIR /app/site
+WORKDIR /app
 
 # Install system packages once at image build time so container restarts do not
 # repeatedly mutate dpkg state.
@@ -18,7 +18,7 @@ RUN apt-get update \
         docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-COPY site/requirements.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
     && python -m playwright install --with-deps chromium \
