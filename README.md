@@ -7,9 +7,11 @@ Container stack setup below.
 ```
 services:
   tag-editor:
-    image: python:3.11-slim-bookworm
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: tag-editor
-    working_dir: /app
+    working_dir: /app/site
     environment:
       - TZ=Europe/Amsterdam
 
@@ -34,7 +36,7 @@ services:
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
     volumes:
-      # App code + requirements live here on the NAS
+      # Repo root lives here on the NAS
       - /opt/beets/tag-editor:/app
       # Playwright browser support
       - tag_editor_playwright_browsers:/ms-playwright
@@ -49,15 +51,8 @@ services:
     ports:
       - "5010:5010"
 
-    # Install Chromaprint (fpcalc) for AcoustID, then Python deps, then run app
-    command: >
-      sh -lc "set -e;
-              apt-get update;
-              apt-get install -y --no-install-recommends libchromaprint-tools ffmpeg file ca-certificates docker.io;
-              rm -rf /var/lib/apt/lists/*;
-              pip install --no-cache-dir -r requirements.txt;
-              python -m playwright install --with-deps chromium;
-              python app.py"
+    # Runtime only starts the app; system packages and Playwright are baked into the image.
+    command: python app.py
     restart: unless-stopped
     
 volumes:
@@ -65,3 +60,5 @@ volumes:
 ```
 
 If you want the footer's "YouTube liked playlist import" action to work, keep the helper script outside this repo and mount it into `/app/scripts/yt_dlp.sh`. The app now starts that script server-side and streams live output into the page over SSE; the script still needs Docker socket access so `docker exec yt-dlp-webui ...` can reach the other container.
+
+If you have already hit `E: dpkg was interrupted`, rebuild the image and recreate the container instead of retrying the old startup command. The broken state was caused by installing Debian packages during container boot; the `Dockerfile` above moves that work to build time so normal restarts stay clean.
