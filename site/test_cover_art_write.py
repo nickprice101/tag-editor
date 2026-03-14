@@ -2,7 +2,7 @@ import tempfile
 from io import BytesIO
 from unittest.mock import patch
 
-from mutagen.id3 import ID3
+from mutagen.id3 import ID3, TPE1, TPE2, TXXX
 from PIL import Image
 
 import app
@@ -55,3 +55,35 @@ def test_upsert_id3_replaces_existing_apic_when_new_art_url_is_provided():
         second = ID3(tmp.name).getall("APIC")
         assert len(second) == 1
         assert second[0].data != first[0].data
+
+
+def test_read_tags_prefers_specific_albumartist_over_generic_various_artists():
+    with tempfile.NamedTemporaryFile(suffix=".mp3") as tmp:
+        tags = ID3()
+        tags.setall("TPE1", [TPE1(encoding=3, text=["A Tribe Called Quest"])])
+        tags.setall("TPE2", [TPE2(encoding=3, text=["Various Artists"])])
+        tags.setall("TXXX", [TXXX(encoding=3, desc="ALBUMARTIST", text=["A Tribe Called Quest"])])
+        tags.save(tmp.name)
+
+        fake_mp3 = type(
+            "FakeMp3",
+            (),
+            {"info": type("FakeInfo", (), {"length": 0.0, "bitrate": 0, "sample_rate": 0})()},
+        )()
+        with patch.object(app, "MP3", return_value=fake_mp3):
+            data = app.read_tags_and_audio(tmp.name)
+
+        assert data["albumartist"] == "A Tribe Called Quest"
+
+
+def test_upsert_id3_rewrites_tpe2_from_authoritative_albumartist():
+    with tempfile.NamedTemporaryFile(suffix=".mp3") as tmp:
+        tags = ID3()
+        tags.setall("TPE2", [TPE2(encoding=3, text=["Various Artists"])])
+        tags.setall("TXXX", [TXXX(encoding=3, desc="ALBUMARTIST", text=["A Tribe Called Quest"])])
+        tags.save(tmp.name)
+
+        app.upsert_id3(tmp.name, {"title": "Stressed Out", "albumartist": ""})
+
+        saved = ID3(tmp.name)
+        assert app.get_text(saved, "TPE2") == "A Tribe Called Quest"
