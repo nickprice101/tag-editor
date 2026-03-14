@@ -5,7 +5,7 @@ services:
       context: /opt/beets/tag-editor
       dockerfile: Dockerfile
     container_name: tag-editor
-    working_dir: /app/site
+    working_dir: /app
     environment:
       TZ: Europe/Amsterdam
 

@@ -4,6 +4,8 @@ Includes filter and search functionality.
 
 Container stack setup below. If you deploy through Portainer, do not paste only the YAML from this README into the web editor and expect `build.context: .` to find the repo's `Dockerfile`; Portainer will build from its temporary stack directory instead. Use the checked-out repo with the included `docker-compose.yml`, or point the stack's build context at the real repo path on disk.
 
+This deployment expects a flat app directory on the Docker host at `/opt/beets/tag-editor`, with files such as `Dockerfile`, `requirements.txt`, and `app.py` living directly in that directory. The repository may keep application files under `site/` for organization, but the deployed NAS directory should stay flat.
+
 ```yaml
 services:
   tag-editor:
@@ -11,7 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: tag-editor
-    working_dir: /app/site
+    working_dir: /app
     environment:
       - TZ=Europe/Amsterdam
 
