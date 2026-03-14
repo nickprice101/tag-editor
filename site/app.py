@@ -5053,7 +5053,7 @@ function connectYtDlpStream(forceReset = false) {{
     disconnectYtDlpStream();
     appendYtDlpLogLine("Stream disconnected.");
   }};
-}
+}}
 
 function renderYtDlpStatus(data) {{
   const link = document.getElementById("runYtDlpLink");
