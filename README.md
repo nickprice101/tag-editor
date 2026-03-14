@@ -23,17 +23,23 @@ services:
       - YT_DLP_SCRIPT=/app/scripts/yt_dlp.sh
 
       # OPTIONAL: enable these lookups by adding keys/tokens
-      - DISCOGS_TOKEN=xxxx
-      - ACOUSTID_KEY=xxxx
-      # No longer implemented as didn't add enough benefit.
-      #- LASTFM_API_KEY=xxx
+      - DISCOGS_TOKEN=XXXXXX
+      - ACOUSTID_KEY=XXXXXX
+
+      # Headless fallback (Playwright)
+      - HEADLESS_ENABLED=1
+      - HEADLESS_TIMEOUT_SECS=20
+
+      # Persist Playwright browsers (so you don't re-download every restart)
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
     volumes:
       # App code + requirements live here on the NAS
       - /opt/beets/tag-editor:/app
+      # Playwright browser support
+      - tag_editor_playwright_browsers:/ms-playwright
       # Helper scripts live outside the repo and are mounted read-only
       - /opt/beets/scripts:/app/scripts:ro
-
       # Music library read/write (needed for tag writes + archive move)
       # Paths should be the same inside and outside the container.
       - /mnt/HD/HD_a2/Media/Music:/mnt/HD/HD_a2/Media/Music
@@ -50,8 +56,12 @@ services:
               apt-get install -y --no-install-recommends libchromaprint-tools ffmpeg file ca-certificates docker.io;
               rm -rf /var/lib/apt/lists/*;
               pip install --no-cache-dir -r requirements.txt;
+              python -m playwright install --with-deps chromium;
               python app.py"
     restart: unless-stopped
+    
+volumes:
+  tag_editor_playwright_browsers:
 ```
 
 If you want the footer's "YouTube liked playlist import" action to work, keep the helper script outside this repo and mount it into `/app/scripts/yt_dlp.sh`. The app now starts that script server-side and streams live output into the page over SSE; the script still needs Docker socket access so `docker exec yt-dlp-webui ...` can reach the other container.
