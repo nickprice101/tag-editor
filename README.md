@@ -2,9 +2,9 @@
 ID3 tag editor using acoustic ID, discogs and beatport lookups, and URL parser. 
 Includes filter and search functionality.
 
-Container stack setup below.
+Container stack setup below. If you deploy through Portainer, do not paste only the YAML from this README into the web editor and expect `build.context: .` to find the repo's `Dockerfile`; Portainer will build from its temporary stack directory instead. Use the checked-out repo with the included `docker-compose.yml`, or point the stack's build context at the real repo path on disk.
 
-```
+```yaml
 services:
   tag-editor:
     build:
@@ -58,6 +58,18 @@ services:
 volumes:
   tag_editor_playwright_browsers:
 ```
+
+The repo now includes [`docker-compose.yml`](C:\Users\nickp\github\tag-editor\docker-compose.yml), so the simplest path is:
+
+```powershell
+cd /opt/beets/tag-editor
+docker compose build
+docker compose up -d
+```
+
+If you prefer Portainer stacks, deploy from the repo directory or Git repository so the build context contains both `docker-compose.yml` and `Dockerfile`.
+
+If you want to paste a stack straight into Portainer's web editor, use [`portainer-stack.yml`](C:\Users\nickp\github\tag-editor\portainer-stack.yml). That version uses an absolute build context (`/opt/beets/tag-editor`) so Portainer builds from the real repo on disk instead of its temporary stack directory.
 
 If you want the footer's "YouTube liked playlist import" action to work, keep the helper script outside this repo and mount it into `/app/scripts/yt_dlp.sh`. The app now starts that script server-side and streams live output into the page over SSE; the script still needs Docker socket access so `docker exec yt-dlp-webui ...` can reach the other container.
 

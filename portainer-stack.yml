@@ -1,0 +1,51 @@
+services:
+  tag-editor:
+    build:
+      # Point Portainer at the actual checked-out repo on the Docker host.
+      context: /opt/beets/tag-editor
+      dockerfile: Dockerfile
+    container_name: tag-editor
+    working_dir: /app/site
+    environment:
+      TZ: Europe/Amsterdam
+
+      # Optional extra auth layer (recommended if exposed beyond LAN; Cloudflare Access also OK)
+      # APP_USER: xxxx
+      # APP_PASS: xxxx
+
+      # REQUIRED: your music root
+      MUSIC_ROOT: /mnt/HD/HD_a2/Media/Music
+      # Optional override if the helper script lives elsewhere in the container
+      YT_DLP_SCRIPT: /app/scripts/yt_dlp.sh
+
+      # OPTIONAL: enable these lookups by adding keys/tokens
+      DISCOGS_TOKEN: XXXXXX
+      ACOUSTID_KEY: XXXXXX
+
+      # Headless fallback (Playwright)
+      HEADLESS_ENABLED: "1"
+      HEADLESS_TIMEOUT_SECS: "20"
+
+      # Persist Playwright browsers (so you don't re-download every restart)
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+
+    volumes:
+      # Repo root lives here on the NAS
+      - /opt/beets/tag-editor:/app
+      # Playwright browser support
+      - tag_editor_playwright_browsers:/ms-playwright
+      # Helper scripts live outside the repo and are mounted read-only
+      - /opt/beets/scripts:/app/scripts:ro
+      # Music library read/write (needed for tag writes + archive move)
+      - /mnt/HD/HD_a2/Media/Music:/mnt/HD/HD_a2/Media/Music
+      # Allow the app container to call docker exec against sibling containers
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    ports:
+      - "5010:5010"
+
+    command: python app.py
+    restart: unless-stopped
+
+volumes:
+  tag_editor_playwright_browsers:
