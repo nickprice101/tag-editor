@@ -1,7 +1,20 @@
-import app as app_module
+import importlib
+import os
+import sys
+import types
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+
+def load_real_app():
+    for name in ("app", "flask", "requests", "PIL", "PIL.Image", "mutagen.id3", "mutagen.mp3", "acoustid"):
+        sys.modules.pop(name, None)
+    sys.modules["acoustid"] = types.ModuleType("acoustid")
+    return importlib.import_module("app")
 
 
 def test_ui_home_file_query_sets_path_and_browse_dir(tmp_path):
+    app_module = load_real_app()
     music_root = tmp_path / "Music"
     target_dir = music_root / "Downloads" / "youtube-downloads"
     target_dir.mkdir(parents=True)
