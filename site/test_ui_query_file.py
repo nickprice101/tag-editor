@@ -48,3 +48,14 @@ def test_ui_home_keeps_yt_dlp_log_split_regex_on_one_line():
 
     assert resp.status_code == 200
     assert "message.split(/\\r?\\n/)" in html
+
+
+def test_ui_home_keeps_http_url_regex_escaped():
+    app_module = load_real_app()
+    client = app_module.app.test_client()
+
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert "!/^https?:\\/\\//i.test(full)" in html
