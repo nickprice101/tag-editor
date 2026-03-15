@@ -39,7 +39,7 @@ def test_ui_home_file_query_sets_path_and_browse_dir(tmp_path):
         app_module._BROWSE_DEFAULT = old_default
 
 
-def test_ui_home_keeps_yt_dlp_log_split_regex_on_one_line():
+def test_ui_home_uses_split_log_lines_helper_for_yt_dlp_output():
     app_module = load_real_app()
     client = app_module.app.test_client()
 
@@ -47,10 +47,12 @@ def test_ui_home_keeps_yt_dlp_log_split_regex_on_one_line():
     html = resp.get_data(as_text=True)
 
     assert resp.status_code == 200
-    assert "message.split(/\\r?\\n/)" in html
+    assert 'function splitLogLines(message)' in html
+    assert 'replaceAll("\\r", "").split("\\n")' in html
+    assert "for (const line of splitLogLines(message)) appendYtDlpLogLine(line);" in html
 
 
-def test_ui_home_keeps_http_url_regex_escaped():
+def test_ui_home_uses_http_url_helper_instead_of_regex_literals():
     app_module = load_real_app()
     client = app_module.app.test_client()
 
@@ -58,4 +60,6 @@ def test_ui_home_keeps_http_url_regex_escaped():
     html = resp.get_data(as_text=True)
 
     assert resp.status_code == 200
-    assert "!/^https?:\\/\\//i.test(full)" in html
+    assert 'function isHttpUrl(value)' in html
+    assert 'normalized.startsWith("http://") || normalized.startsWith("https://")' in html
+    assert "!d || !isHttpUrl(full)" in html

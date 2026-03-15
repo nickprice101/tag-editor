@@ -4941,7 +4941,7 @@ const _coverDimCache = new Map();
 function onResultThumbLoad(img, fullSrc) {{
   const d = img ? img.nextElementSibling : null;
   const full = String(fullSrc || "").trim();
-  if(!d || !/^https?:\\/\\//i.test(full)) return;
+  if(!d || !isHttpUrl(full)) return;
   const cached = _coverDimCache.get(full);
   if(cached) {{
     d.textContent = cached.width + "×" + cached.height;
@@ -4959,7 +4959,7 @@ function onResultThumbLoad(img, fullSrc) {{
 
 function showImageModal(src) {{
   const s = String(src || "");
-  if(!/^https?:\\/\\//i.test(s)) return;
+  if(!isHttpUrl(s)) return;
   const imgId = "imgModalImg_" + Date.now();
   const dimId = "imgModalDim_" + Date.now();
   showModal(`
@@ -5021,6 +5021,15 @@ function resetYtDlpLogWindow() {{
   if(!log) return;
   log.innerHTML = "";
   log.style.display = "none";
+}}
+
+function splitLogLines(message) {{
+  return String(message || "").replaceAll("\\r", "").split("\\n");
+}}
+
+function isHttpUrl(value) {{
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized.startsWith("http://") || normalized.startsWith("https://");
 }}
 
 function disconnectYtDlpStream() {{
@@ -5098,7 +5107,7 @@ async function loadYtDlpStatus() {{
       const message = String((data.last_error || data.last_output) || "").trim();
       if(message) {{
         resetYtDlpLogWindow();
-        for (const line of message.split(/\\r?\\n/)) appendYtDlpLogLine(line);
+        for (const line of splitLogLines(message)) appendYtDlpLogLine(line);
       }}
     }}
   }} catch(err) {{
