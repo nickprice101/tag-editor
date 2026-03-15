@@ -7,3 +7,5 @@ Before performing any edits in this repository:
    git clean -fd
 
 Do not proceed with modifications until the repo is synced.
+
+Note that "site" directory is used for organisation and the app is deployed into the flat "/app" directory on the server and note "/app/site".
