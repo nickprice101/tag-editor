@@ -5098,7 +5098,7 @@ async function loadYtDlpStatus() {{
       const message = String((data.last_error || data.last_output) || "").trim();
       if(message) {{
         resetYtDlpLogWindow();
-        for (const line of message.split(/\r?\n/)) appendYtDlpLogLine(line);
+        for (const line of message.split(/\\r?\\n/)) appendYtDlpLogLine(line);
       }}
     }}
   }} catch(err) {{
