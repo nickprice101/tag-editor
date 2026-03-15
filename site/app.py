@@ -4074,7 +4074,7 @@ function sortName(name) {{
 function isNameTransform(name) {{
   name = (name || "").trim();
   if(!name || name.includes(",")) return name;
-  const parts = name.split(/\s+/);
+  const parts = splitWhitespace(name);
   if(parts.length < 2) return name;
   const given = parts[0];
   const surname = parts.slice(1).join(" ");
@@ -5053,6 +5053,10 @@ function splitLogLines(message) {{
 function isHttpUrl(value) {{
   const normalized = String(value || "").trim().toLowerCase();
   return normalized.startsWith("http://") || normalized.startsWith("https://");
+}}
+
+function splitWhitespace(value) {{
+  return String(value || "").trim().split(" ").filter(Boolean);
 }}
 
 function disconnectYtDlpStream() {{

@@ -78,7 +78,9 @@ def test_ui_home_uses_string_helpers_instead_of_inline_regex_literals():
     assert 'function isFourDigitYear(value)' in html
     assert 'function isDigitsOnly(value)' in html
     assert 'function hasZeroTrackTotal(value)' in html
+    assert 'function splitWhitespace(value)' in html
     assert 'stripMp3Suffix(fn)' in html
+    assert 'splitWhitespace(name)' in html
     assert 'const dateYear = extractLeadingYear(dateVal);' in html
     assert 'if(!trackVal || hasZeroTrackTotal(trackVal)) setField("track", "1/1");' in html
     assert 'if(isDigitsOnly(pos)) setField("track", pos);' in html
