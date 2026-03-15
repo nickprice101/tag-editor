@@ -4941,7 +4941,7 @@ const _coverDimCache = new Map();
 function onResultThumbLoad(img, fullSrc) {{
   const d = img ? img.nextElementSibling : null;
   const full = String(fullSrc || "").trim();
-  if(!d || !/^https?:\/\//i.test(full)) return;
+  if(!d || !/^https?:\\/\\//i.test(full)) return;
   const cached = _coverDimCache.get(full);
   if(cached) {{
     d.textContent = cached.width + "×" + cached.height;
