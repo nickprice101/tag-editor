@@ -63,3 +63,22 @@ def test_ui_home_uses_http_url_helper_instead_of_regex_literals():
     assert 'function isHttpUrl(value)' in html
     assert 'normalized.startsWith("http://") || normalized.startsWith("https://")' in html
     assert "!d || !isHttpUrl(full)" in html
+
+
+def test_ui_home_uses_string_helpers_instead_of_inline_regex_literals():
+    app_module = load_real_app()
+    client = app_module.app.test_client()
+
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert 'function stripMp3Suffix(value)' in html
+    assert 'function extractLeadingYear(value)' in html
+    assert 'function isFourDigitYear(value)' in html
+    assert 'function isDigitsOnly(value)' in html
+    assert 'function hasZeroTrackTotal(value)' in html
+    assert 'stripMp3Suffix(fn)' in html
+    assert 'const dateYear = extractLeadingYear(dateVal);' in html
+    assert 'if(!trackVal || hasZeroTrackTotal(trackVal)) setField("track", "1/1");' in html
+    assert 'if(isDigitsOnly(pos)) setField("track", pos);' in html

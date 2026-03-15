@@ -3933,11 +3933,35 @@ function setBaseline(data) {{
   updateAllRevertUI();
 }}
 function esc(s){{ return (s||"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }}
+function stripMp3Suffix(value) {{
+  const text = String(value || "");
+  return text.toLowerCase().endsWith(".mp3") ? text.slice(0, -4) : text;
+}}
+function extractLeadingYear(value) {{
+  const text = String(value || "").trim();
+  if(text.length < 4) return "";
+  const year = text.slice(0, 4);
+  return isFourDigitYear(year) ? year : "";
+}}
+function isFourDigitYear(value) {{
+  const text = String(value || "").trim();
+  return text.length === 4 && isDigitsOnly(text);
+}}
+function isDigitsOnly(value) {{
+  const text = String(value || "").trim();
+  return text.length > 0 && Array.from(text).every(ch => ch >= "0" && ch <= "9");
+}}
+function hasZeroTrackTotal(value) {{
+  const text = String(value || "").trim();
+  if(!text) return false;
+  const parts = text.split("/").map(part => part.trim());
+  return parts.length === 2 && isDigitsOnly(parts[0]) && parts[1] === "0";
+}}
 function formatReleasedDateText(value) {{
   const text = String(value || "").trim();
   if(!text) return "";
-  const m = text.match(/^(\d{{4}}-\d{{2}}-\d{{2}})T/);
-  return m ? m[1] : text;
+  const isoDate = text.slice(0, 10);
+  return isoDate.length === 10 && text.charAt(10) === "T" ? isoDate : text;
 }}
 function showToast(message, kind="info", ms=2800) {{
   const stack = document.getElementById("toastStack");
@@ -4060,19 +4084,19 @@ function isNameTransform(name) {{
 
 function copyYearToDate() {{
   const year = getField("year").trim();
-  if(/^\d{4}$/.test(year)) setField("date", year);
+  if(isFourDigitYear(year)) setField("date", year);
 }}
 
 function copyDateToYear() {{
   const dateVal = getField("date").trim();
   if(!dateVal) return;
-  const m = dateVal.match(/^(\d{{4}})/);
-  if(m) {{
-    setField("year", m[1]);
+  const leadingYear = extractLeadingYear(dateVal);
+  if(leadingYear) {{
+    setField("year", leadingYear);
     return;
   }}
   const parts = dateVal.split("-");
-  if(parts[0] && /^\d{{4}}$/.test(parts[0])) setField("year", parts[0]);
+  if(parts[0] && isFourDigitYear(parts[0])) setField("year", parts[0]);
 }}
 
 function copyYearToOriginalYear() {{
@@ -4204,7 +4228,7 @@ function openFile(p){{
   // Update web search query with filename (unless user manually edited since last auto-set)
   const wsqEl = document.getElementById("wsq");
   if(wsqEl && (!wsqEl.value.trim() || wsqEl.value.trim() === _wsqAutoValue.trim())){{
-    const autoVal = fn.replace(/\\.mp3$/i, "");
+    const autoVal = stripMp3Suffix(fn);
     wsqEl.value = autoVal;
     _wsqAutoValue = autoVal;
   }}
@@ -4313,12 +4337,12 @@ function applyAutoPopulatedTagDefaults() {{
     else if(artist) setField("albumartist_sort", artist);
   }}
 
-  if(!trackVal || /^\d+\s*\/\s*0$/.test(trackVal)) setField("track", "1/1");
+  if(!trackVal || hasZeroTrackTotal(trackVal)) setField("track", "1/1");
 
   if(!originalYear || originalYear === "0000") {{
     if(originalYear === "0000") setField("original_year", "");
-    const dateYearMatch = dateVal.match(/^(\d{{4}})/);
-    if(dateYearMatch) setField("original_year", dateYearMatch[1]);
+    const dateYear = extractLeadingYear(dateVal);
+    if(dateYear) setField("original_year", dateYear);
     else if(yearVal) setField("original_year", yearVal);
   }}
 
@@ -4385,7 +4409,7 @@ async function loadTags(pathOrSeq = "", seq = 0){{
   const wsq = document.getElementById("wsq");
   if(wsq){{
     const art = data.artist || ""; const tit = data.title || "";
-    const autoVal = (art && tit) ? `${{art}} \u2013 ${{tit}}` : (art || tit || fn.replace(/\\.mp3$/i,""));
+    const autoVal = (art && tit) ? `${{art}} \u2013 ${{tit}}` : (art || tit || stripMp3Suffix(fn));
     wsq.value = autoVal;
     _wsqAutoValue = autoVal;
   }}
@@ -4409,7 +4433,7 @@ function closeMbDialog(){{
 function inferFromFilename(){{
   const p = document.getElementById("path").value.trim();
   if(!p) return "";
-  return p.split("/").pop().replace(/\\.mp3$/i,"");
+  return stripMp3Suffix(p.split("/").pop());
 }}
 function runMbSearch(){{
   const title = document.getElementById("mbDlgTitle").value.trim();
@@ -4567,8 +4591,7 @@ function discogsUse(i) {{
   );
 }}
 function applyTrack(pos, title){{
-  const m = (pos||"").match(/^\\d+$/);
-  if(m) setField("track", pos);
+  if(isDigitsOnly(pos)) setField("track", pos);
   setField("title", title);
 }}
 
