@@ -132,3 +132,33 @@ def test_upsert_id3_rewrites_tpe2_from_authoritative_albumartist():
 
         saved = ID3(path)
         assert app.get_text(saved, "TPE2") == "A Tribe Called Quest"
+
+
+def test_get_txxx_matches_description_case_insensitively():
+    app, ID3, _, _, TXXX = load_real_app_deps()
+    with temp_mp3_path() as path:
+        tags = ID3()
+        tags.setall("TXXX", [TXXX(encoding=3, desc="MUSICBRAINZ_TRACKID", text=["abc-123"])])
+        tags.save(path)
+
+        saved = ID3(path)
+        assert app.get_txxx(saved, "musicbrainz_trackid") == "abc-123"
+
+
+def test_read_tags_uses_tipl_when_involved_people_list_txxx_missing():
+    app, ID3, _, _, _ = load_real_app_deps()
+    id3_mod = importlib.import_module("mutagen.id3")
+    with temp_mp3_path() as path:
+        tags = ID3()
+        tags.setall("TIPL", [id3_mod.TIPL(encoding=3, people=[("Producer", "Adi Oasis")])])
+        tags.save(path)
+
+        fake_mp3 = type(
+            "FakeMp3",
+            (),
+            {"info": type("FakeInfo", (), {"length": 0.0, "bitrate": 0, "sample_rate": 0})()},
+        )()
+        with patch.object(app, "MP3", return_value=fake_mp3):
+            data = app.read_tags_and_audio(path)
+
+        assert data["involved_people_list"] == "Producer: Adi Oasis"
