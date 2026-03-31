@@ -39,6 +39,46 @@ def test_ui_home_file_query_sets_path_and_browse_dir(tmp_path):
         app_module._BROWSE_DEFAULT = old_default
 
 
+def test_candidate_requested_paths_preserves_canonical_mount_prefix():
+    app_module = load_real_app()
+    old_root = app_module.MUSIC_ROOT
+    app_module.MUSIC_ROOT = "/mnt/user/media/music"
+    try:
+        candidates = app_module._candidate_requested_paths(
+            "/mnt/user/media/music/Downloads/youtube-downloads/example.mp3"
+        )
+        assert "/mnt/user/media/music/Downloads/youtube-downloads/example.mp3" in candidates
+    finally:
+        app_module.MUSIC_ROOT = old_root
+
+
+def test_ui_home_file_query_with_music_relative_prefix_sets_path_and_browse_dir(tmp_path):
+    app_module = load_real_app()
+    music_root = tmp_path / "music"
+    target_dir = music_root / "Downloads" / "youtube-downloads"
+    target_dir.mkdir(parents=True)
+    target_file = target_dir / "legacy.mp3"
+    target_file.write_bytes(b"ID3")
+
+    old_root = app_module.MUSIC_ROOT
+    old_default = app_module._BROWSE_DEFAULT
+    app_module.MUSIC_ROOT = str(music_root)
+    app_module._BROWSE_DEFAULT = str(music_root)
+
+    try:
+        client = app_module.app.test_client()
+        alt_prefix_url_path = "/srv/storage/music/Downloads/youtube-downloads/legacy.mp3"
+        resp = client.get("/", query_string={"file": alt_prefix_url_path})
+        html = resp.get_data(as_text=True)
+
+        assert resp.status_code == 200
+        assert f'id="path" value="{target_file}"' in html
+        assert f'id="dir" value="{target_dir}"' in html
+    finally:
+        app_module.MUSIC_ROOT = old_root
+        app_module._BROWSE_DEFAULT = old_default
+
+
 def test_ui_home_uses_split_log_lines_helper_for_yt_dlp_output():
     app_module = load_real_app()
     client = app_module.app.test_client()

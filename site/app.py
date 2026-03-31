@@ -38,7 +38,7 @@ APP_PASS = os.getenv("APP_PASS", "")
 MUSIC_ROOT = os.getenv("MUSIC_ROOT", "/mnt/HD/HD_a2/Media/Music").rstrip("/")
 YT_DLP_SCRIPT = os.getenv("YT_DLP_SCRIPT", "/app/scripts/yt_dlp.sh").strip() or "/app/scripts/yt_dlp.sh"
 
-_BROWSE_STARTUP_CANDIDATE = "/mnt/HD/HD_a2/Media/Music/Downloads/youtube-downloads"
+_BROWSE_STARTUP_CANDIDATE = "/mnt/user/media/music/Downloads/youtube-downloads"
 try:
     _real_cand = os.path.realpath(_BROWSE_STARTUP_CANDIDATE)
     _real_root = os.path.realpath(MUSIC_ROOT)
@@ -163,6 +163,33 @@ def safe_dir(d: str) -> str:
     if not os.path.isdir(real):
         raise ValueError("Directory does not exist.")
     return real
+
+
+def _candidate_requested_paths(raw_path: str) -> list:
+    """Return likely filesystem candidates for a requested query path."""
+    raw = (raw_path or "").strip()
+    if not raw:
+        return []
+    decoded = unquote(raw)
+    candidates = [decoded]
+
+    # If a shared "/music/" segment exists, rebuild relative to MUSIC_ROOT.
+    lower_decoded = decoded.lower()
+    music_marker = "/music/"
+    marker_idx = lower_decoded.find(music_marker)
+    if marker_idx != -1:
+        rel_tail = decoded[marker_idx + len(music_marker):]
+        if rel_tail:
+            candidates.append(os.path.join(MUSIC_ROOT, rel_tail))
+
+    # De-duplicate while preserving order.
+    unique = []
+    seen = set()
+    for cand in candidates:
+        if cand not in seen:
+            seen.add(cand)
+            unique.append(cand)
+    return unique
 
 
 def _snapshot_script_job_state() -> dict:
@@ -3294,10 +3321,12 @@ def ui_home():
     requested_path = (request.args.get("file") or request.args.get("path") or "").strip()
     path = ""
     if requested_path:
-        try:
-            path = safe_path(requested_path)
-        except Exception:
-            path = ""
+        for cand in _candidate_requested_paths(requested_path):
+            try:
+                path = safe_path(cand)
+                break
+            except Exception:
+                path = ""
 
     browse_default = _BROWSE_DEFAULT
     if path:
