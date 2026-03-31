@@ -757,8 +757,10 @@ def get_text(tags: ID3, key: str) -> str:
     return str(f.text[0]).strip()
 
 def get_txxx(tags: ID3, desc: str) -> str:
+    desc_normalized = (desc or "").strip().casefold()
     for t in tags.getall("TXXX"):
-        if getattr(t, "desc", "") == desc and getattr(t, "text", None):
+        t_desc = str(getattr(t, "desc", "")).strip().casefold()
+        if t_desc == desc_normalized and getattr(t, "text", None):
             return str(t.text[0]).strip()
     return ""
 
@@ -780,6 +782,21 @@ def get_albumartist(tags: ID3) -> str:
     if specific_fallback:
         return specific_fallback
     return next((value for value in fallbacks if value), "")
+
+
+def get_involved_people_list(tags: ID3) -> str:
+    txxx_value = get_txxx(tags, "involved_people_list")
+    if txxx_value:
+        return txxx_value
+    tipl = tags.get("TIPL")
+    people = getattr(tipl, "people", None) if tipl else None
+    if people:
+        return ", ".join(
+            f"{role}: {person}".strip(": ").strip()
+            for role, person in people
+            if role or person
+        ).strip()
+    return ""
 
 def set_txxx(tags: ID3, desc: str, value: str):
     value = (value or "").strip()
@@ -1043,6 +1060,8 @@ def read_tags_and_audio(mp3_path: str) -> dict:
     if not ufid and tags.getall("UFID"):
         ufid = tags.getall("UFID")[0].data.decode("utf-8", errors="ignore").strip()
 
+    involved_people_list = get_involved_people_list(tags)
+
     return {
         "path": mp3_path,
         "title": get_text(tags, "TIT2"),
@@ -1064,7 +1083,7 @@ def read_tags_and_audio(mp3_path: str) -> dict:
         "unique_file_identifier": ufid,
         "encoder_settings": get_text(tags, "TSSE"),
         "involved": get_text(tags, "TIPL"),
-        "involved_people_list": get_txxx(tags, "involved_people_list"),
+        "involved_people_list": involved_people_list,
         "label": get_txxx(tags, "label"),
         "catalog_number": get_txxx(tags, "CATALOGNUMBER") or get_txxx(tags, "catalog_number"),
         "bpm": get_text(tags, "TBPM"),
