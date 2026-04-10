@@ -8,6 +8,7 @@ import os
 import types
 
 import pytest
+import app as app_mod
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -59,7 +60,8 @@ from app import (_split_query_artist_title, normalize_search_query,  # noqa: E40
                  _build_retry_query, _site_search_url,
                  _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE,
                  _should_retry_without_remix, _RETRY_SUFFICIENT_HITS,
-                 _juno_thumb_to_full, _drop_zero_score_structured)
+                 _juno_thumb_to_full, _drop_zero_score_structured,
+                 _google_image_search)
 
 
 # ---------------------------------------------------------------------------
@@ -655,3 +657,60 @@ def test_drop_zero_score_structured_keeps_positive_hits():
 
     assert len(filtered) == 1
     assert filtered[0]["title"] == "Match"
+
+
+def test_google_image_search_uses_probed_full_image_dimensions(monkeypatch):
+    """500x500 filtering should use the candidate URL dimensions, not thumbnail dims."""
+    class _Locator:
+        def count(self):
+            return 1
+        def nth(self, _i):
+            return self
+        def get_attribute(self, name):
+            return "https://encrypted-tbn0.gstatic.com/thumb.jpg" if name == "src" else "Thumb"
+        def scroll_into_view_if_needed(self, timeout=0):
+            return None
+        def click(self, timeout=0):
+            return None
+
+    class _Page:
+        def goto(self, *a, **kw):
+            return None
+        def wait_for_timeout(self, *_a, **_kw):
+            return None
+        def locator(self, _sel):
+            return _Locator()
+        def evaluate(self, script, arg=None):
+            if "querySelectorAll('img')" in script:
+                # Candidate appears tiny in-page, but full URL is large when probed.
+                return [{"src": "https://lh3.googleusercontent.com/full-image.jpg", "alt": "Cover", "w": 120, "h": 120}]
+            if "new Image()" in script:
+                return {"src": arg, "w": 1200, "h": 1200}
+            return []
+
+    class _Context:
+        def new_page(self):
+            return _Page()
+
+    class _Browser:
+        def new_context(self, **_kw):
+            return _Context()
+        def close(self):
+            return None
+
+    class _Playwright:
+        chromium = type("Chromium", (), {"launch": staticmethod(lambda headless=True: _Browser())})
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(app_mod, "_PLAYWRIGHT_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(app_mod, "_sync_playwright", lambda: _Playwright(), raising=False)
+    monkeypatch.setattr(app_mod.requests, "utils", type("Utils", (), {"quote": staticmethod(lambda s, safe='': s)}), raising=False)
+
+    out = _google_image_search("artist title", max_results=1, min_width=500, min_height=500)
+    assert len(out) == 1
+    assert out[0]["art_url"] == "https://lh3.googleusercontent.com/full-image.jpg"
+    assert out[0]["width"] == 1200
+    assert out[0]["height"] == 1200
