@@ -401,7 +401,11 @@ def _bandcamp_thumb_to_full(url: str) -> str:
 
 def _google_image_search(query: str, max_results: int = 5,
                          min_width: int = 500, min_height: int = 500) -> list:
-    """Best-effort Google Images lookup returning full image URLs and dimensions."""
+    """Best-effort Google Images lookup returning full image URLs and dimensions.
+
+    Important: dimension filtering is performed against candidate full image URLs
+    (not the visible grid thumbnail element dimensions).
+    """
     q = (query or "").strip()
     if not q:
         return []
@@ -451,19 +455,43 @@ def _google_image_search(query: str, max_results: int = 5,
                 """) or []
                 best = None
                 best_area = 0
+                # Check likely-original URLs first, then progressively fall back.
+                # We do NOT exclude googleusercontent.com because Google often
+                # serves full-size originals via that host.
                 for c in candidates:
                     u = str(c.get("src") or "").strip()
-                    w = int(c.get("w") or 0)
-                    h = int(c.get("h") or 0)
                     if not u.startswith("http"):
                         continue
-                    if "gstatic.com" in u or "googleusercontent.com" in u or "encrypted-tbn" in u:
+                    if "gstatic.com" in u or "encrypted-tbn" in u:
                         continue
+                    # Validate dimensions against the candidate URL itself so
+                    # thumbnails don't incorrectly fail the 500x500 threshold.
+                    probed = page.evaluate(
+                        """
+                        async (src) => {
+                          const d = await new Promise((resolve) => {
+                            const im = new Image();
+                            im.onload = () => resolve({w: im.naturalWidth || 0, h: im.naturalHeight || 0});
+                            im.onerror = () => resolve({w: 0, h: 0});
+                            im.src = src;
+                          });
+                          return {src, w: d.w, h: d.h};
+                        }
+                        """,
+                        u,
+                    ) or {}
+                    w = int(probed.get("w") or c.get("w") or 0)
+                    h = int(probed.get("h") or c.get("h") or 0)
                     if w < min_width or h < min_height:
                         continue
                     area = w * h
                     if area > best_area:
-                        best = c
+                        best = {
+                            "src": u,
+                            "alt": c.get("alt") or "",
+                            "w": w,
+                            "h": h,
+                        }
                         best_area = area
                 if not best:
                     continue
