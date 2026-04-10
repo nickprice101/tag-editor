@@ -399,6 +399,68 @@ def _bandcamp_thumb_to_full(url: str) -> str:
     return re.sub(r"_(?:\d+)\.jpg$", "_16.jpg", url)
 
 
+def _bing_image_search_fallback(query: str, max_results: int = 5,
+                                min_width: int = 500, min_height: int = 500) -> list:
+    """Fallback image search using Bing image cards when Google is blocked."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        r = requests.get(
+            "https://www.bing.com/images/search",
+            params={"q": q, "form": "HDRSC2"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+    except Exception:
+        return []
+
+    out: list = []
+    seen: set = set()
+    soup = BeautifulSoup(r.text, "html.parser")
+    for a in soup.select("a.iusc"):
+        if len(out) >= max_results:
+            break
+        raw = (a.get("m") or "").strip()
+        if not raw:
+            continue
+        try:
+            meta = json.loads(raw)
+        except Exception:
+            continue
+        src = str(meta.get("murl") or "").strip()
+        if not src.startswith("http") or src in seen:
+            continue
+        w = int(meta.get("mw") or meta.get("w") or meta.get("ow") or 0)
+        h = int(meta.get("mh") or meta.get("h") or meta.get("oh") or 0)
+        if w <= 0 or h <= 0:
+            try:
+                ir = requests.get(src, timeout=8, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+                ir.raise_for_status()
+                with Image.open(BytesIO(ir.content)) as im:
+                    w, h = im.size
+            except Exception:
+                w, h = 0, 0
+        if w < min_width or h < min_height:
+            continue
+        seen.add(src)
+        out.append({
+            "title": str(meta.get("t") or a.get("title") or "Image").strip() or "Image",
+            "thumb": str(meta.get("turl") or "").strip(),
+            "art_url": src,
+            "width": w,
+            "height": h,
+            "source": "Google Images (Bing fallback)",
+        })
+    return out[:max_results]
+
+
 def _google_image_search(query: str, max_results: int = 5,
                          min_width: int = 500, min_height: int = 500) -> list:
     """Best-effort Google Images lookup returning full image URLs and dimensions.
@@ -424,10 +486,14 @@ def _google_image_search(query: str, max_results: int = 5,
                 ),
                 locale="en-US",
                 viewport={"width": 1600, "height": 1200},
+                ignore_https_errors=True,
             )
             page = ctx.new_page()
             url = f"https://www.google.com/search?tbm=isch&hl=en&q={requests.utils.quote(q, safe='')}"
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if "/sorry/" in page.url:
+                return _bing_image_search_fallback(q, max_results=max_results,
+                                                   min_width=min_width, min_height=min_height)
             page.wait_for_timeout(1200)
             thumbs = page.locator("img")
             total = min(thumbs.count(), 40)
@@ -446,12 +512,26 @@ def _google_image_search(query: str, max_results: int = 5,
                     continue
 
                 candidates = page.evaluate("""
-                  () => Array.from(document.querySelectorAll('img')).map(img => ({
-                    src: img.currentSrc || img.src || '',
-                    alt: img.alt || '',
-                    w: img.naturalWidth || 0,
-                    h: img.naturalHeight || 0,
-                  }))
+                  () => {
+                    const imgCandidates = Array.from(document.querySelectorAll('img')).map(img => ({
+                      src: img.currentSrc || img.src || '',
+                      alt: img.alt || '',
+                      w: img.naturalWidth || 0,
+                      h: img.naturalHeight || 0,
+                    }));
+                    // Google image cards often embed the canonical image URL in
+                    // anchor query params (imgurl/imgrc) even when visible img
+                    // tags are only thumbnails.
+                    const hrefCandidates = Array.from(document.querySelectorAll("a[href*='imgurl=']")).map(a => {
+                      const href = a.getAttribute('href') || '';
+                      const abs = (() => {
+                        try { return new URL(href, location.href); } catch (_e) { return null; }
+                      })();
+                      const src = abs ? (abs.searchParams.get('imgurl') || '') : '';
+                      return { src, alt: a.getAttribute('aria-label') || '', w: 0, h: 0 };
+                    });
+                    return imgCandidates.concat(hrefCandidates);
+                  }
                 """) or []
                 best = None
                 best_area = 0
@@ -509,7 +589,10 @@ def _google_image_search(query: str, max_results: int = 5,
                 })
         finally:
             browser.close()
-    return out[:max_results]
+    if out:
+        return out[:max_results]
+    return _bing_image_search_fallback(q, max_results=max_results,
+                                       min_width=min_width, min_height=min_height)
 
 
 def _should_retry_without_remix(retry_meaningful: bool, retry_q_out: str, norm_q_out: str,

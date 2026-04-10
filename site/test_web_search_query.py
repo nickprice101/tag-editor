@@ -674,6 +674,7 @@ def test_google_image_search_uses_probed_full_image_dimensions(monkeypatch):
             return None
 
     class _Page:
+        url = "https://www.google.com/search?tbm=isch&q=artist+title"
         def goto(self, *a, **kw):
             return None
         def wait_for_timeout(self, *_a, **_kw):
@@ -714,3 +715,113 @@ def test_google_image_search_uses_probed_full_image_dimensions(monkeypatch):
     assert out[0]["art_url"] == "https://lh3.googleusercontent.com/full-image.jpg"
     assert out[0]["width"] == 1200
     assert out[0]["height"] == 1200
+
+
+def test_google_image_search_accepts_imgurl_anchor_candidates(monkeypatch):
+    """Accept full image URLs exposed via Google imgurl anchor params."""
+    class _Locator:
+        def count(self):
+            return 1
+        def nth(self, _i):
+            return self
+        def get_attribute(self, name):
+            return "https://encrypted-tbn0.gstatic.com/thumb.jpg" if name == "src" else "Thumb"
+        def scroll_into_view_if_needed(self, timeout=0):
+            return None
+        def click(self, timeout=0):
+            return None
+
+    class _Page:
+        url = "https://www.google.com/search?tbm=isch&q=artist+title"
+        def goto(self, *a, **kw):
+            return None
+        def wait_for_timeout(self, *_a, **_kw):
+            return None
+        def locator(self, _sel):
+            return _Locator()
+        def evaluate(self, script, arg=None):
+            if "a[href*='imgurl=']" in script:
+                return [{"src": "https://i.scdn.co/image/ab67616d0000b273b9a1d137708344697dfd29a6", "alt": "Cover", "w": 0, "h": 0}]
+            if "new Image()" in script:
+                return {"src": arg, "w": 640, "h": 640}
+            return []
+
+    class _Context:
+        def new_page(self):
+            return _Page()
+
+    class _Browser:
+        seen_new_context_kwargs = None
+        def new_context(self, **kw):
+            _Browser.seen_new_context_kwargs = kw
+            return _Context()
+        def close(self):
+            return None
+
+    class _Playwright:
+        chromium = type("Chromium", (), {"launch": staticmethod(lambda headless=True: _Browser())})
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(app_mod, "_PLAYWRIGHT_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(app_mod, "_sync_playwright", lambda: _Playwright(), raising=False)
+    monkeypatch.setattr(app_mod.requests, "utils", type("Utils", (), {"quote": staticmethod(lambda s, safe='': s)}), raising=False)
+
+    out = _google_image_search("artist title", max_results=1, min_width=500, min_height=500)
+    assert len(out) == 1
+    assert out[0]["art_url"] == "https://i.scdn.co/image/ab67616d0000b273b9a1d137708344697dfd29a6"
+    assert out[0]["width"] == 640
+    assert out[0]["height"] == 640
+    assert _Browser.seen_new_context_kwargs["ignore_https_errors"] is True
+
+
+def test_google_image_search_falls_back_when_google_sorry_page(monkeypatch):
+    class _Locator:
+        def count(self):
+            return 0
+        def nth(self, _i):
+            return self
+
+    class _Page:
+        url = "https://www.google.com/sorry/index?continue=..."
+        def goto(self, *a, **kw):
+            return None
+        def wait_for_timeout(self, *_a, **_kw):
+            return None
+        def locator(self, _sel):
+            return _Locator()
+        def evaluate(self, script, arg=None):
+            return []
+
+    class _Context:
+        def new_page(self):
+            return _Page()
+
+    class _Browser:
+        def new_context(self, **_kw):
+            return _Context()
+        def close(self):
+            return None
+
+    class _Playwright:
+        chromium = type("Chromium", (), {"launch": staticmethod(lambda headless=True: _Browser())})
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(app_mod, "_PLAYWRIGHT_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(app_mod, "_sync_playwright", lambda: _Playwright(), raising=False)
+    monkeypatch.setattr(app_mod.requests, "utils", type("Utils", (), {"quote": staticmethod(lambda s, safe='': s)}), raising=False)
+    monkeypatch.setattr(
+        app_mod,
+        "_bing_image_search_fallback",
+        lambda *a, **kw: [{"art_url": "https://i.scdn.co/image/ab67616d0000b273b9a1d137708344697dfd29a6", "width": 640, "height": 640}],
+        raising=False,
+    )
+
+    out = _google_image_search("artist title", max_results=1, min_width=500, min_height=500)
+    assert len(out) == 1
+    assert out[0]["art_url"] == "https://i.scdn.co/image/ab67616d0000b273b9a1d137708344697dfd29a6"
