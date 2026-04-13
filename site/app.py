@@ -67,6 +67,9 @@ _RETRY_SCORE_THRESHOLD = 78
 _RETRY_SUFFICIENT_HITS = 3
 
 UA = "CorsicanEscapeTagEditor/2.0 (nick@corsicanescape.com)"
+ANDROID_LIBRARY_SCAN_BASE_URL = (
+    os.getenv("ANDROID_LIBRARY_SCAN_BASE_URL", "http://127.0.0.1").rstrip("/")
+)
 
 # Browser-like User-Agent used specifically for Bandcamp requests to avoid 403s
 BANDCAMP_UA = (
@@ -1206,8 +1209,29 @@ def read_tags_and_audio(mp3_path: str) -> dict:
     }
 
 # ---------------- Archive ----------------
+def trigger_android_library_scan(dir_path: str) -> None:
+    dir_path = (dir_path or "").strip()
+    if not dir_path:
+        return
+    if not ANDROID_LIBRARY_SCAN_BASE_URL:
+        return
+
+    url = f"{ANDROID_LIBRARY_SCAN_BASE_URL}/android/library_scan.php"
+    try:
+        requests.get(
+            url,
+            params={"async": "1", "path": dir_path},
+            timeout=3,
+            headers={"User-Agent": UA},
+        )
+    except Exception:
+        # Scanning should never block archive completion.
+        pass
+
+
 def archive_mp3(mp3_path: str) -> str:
     tags = ID3(mp3_path)
+    source_dir = os.path.dirname(mp3_path)
     genre = sanitize_component(get_text(tags, "TCON"))
     albumartist_sort = sanitize_component(
         get_text(tags, "TSO2") or sort_name(get_albumartist(tags) or get_text(tags, "TPE1"))
@@ -1237,6 +1261,8 @@ def archive_mp3(mp3_path: str) -> str:
         dest = f"{root} ({i}){ext}"
 
     shutil.move(mp3_path, dest)
+    trigger_android_library_scan(source_dir)
+    trigger_android_library_scan(os.path.dirname(dest))
     return dest
 
 # ---------------- File browsing/search ----------------
