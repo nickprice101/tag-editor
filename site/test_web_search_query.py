@@ -61,7 +61,7 @@ from app import (_split_query_artist_title, normalize_search_query,  # noqa: E40
                  _RETRY_SCORE_THRESHOLD, _TRAILING_REMIX_RE,
                  _should_retry_without_remix, _RETRY_SUFFICIENT_HITS,
                  _juno_thumb_to_full, _drop_zero_score_structured,
-                 _google_image_search)
+                 _google_image_search, _beatport_image_urls)
 
 
 # ---------------------------------------------------------------------------
@@ -825,3 +825,22 @@ def test_google_image_search_falls_back_when_google_sorry_page(monkeypatch):
     out = _google_image_search("artist title", max_results=1, min_width=500, min_height=500)
     assert len(out) == 1
     assert out[0]["art_url"] == "https://i.scdn.co/image/ab67616d0000b273b9a1d137708344697dfd29a6"
+
+
+def test_beatport_image_urls_prefers_largest_cover_and_small_thumb():
+    images = {
+        "small": {"uri": "https://img.example/180x180.jpg"},
+        "medium": {"uri": "https://img.example/500x500.jpg"},
+        "large": {"uri": "https://img.example/1000x1000.jpg"},
+        "xlarge": {"uri": "https://img.example/1400x1400.jpg"},
+    }
+    thumb, cover = _beatport_image_urls(images)
+    assert thumb == "https://img.example/180x180.jpg"
+    assert cover == "https://img.example/1400x1400.jpg"
+
+
+def test_beatport_image_urls_expands_dynamic_template():
+    images = {"dynamic": {"uri": "https://img.example/{w}x{h}.jpg"}}
+    thumb, cover = _beatport_image_urls(images)
+    assert thumb == "https://img.example/500x500.jpg"
+    assert cover == "https://img.example/1400x1400.jpg"

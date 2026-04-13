@@ -2166,6 +2166,57 @@ def _extract_beatport_data_array(html: str) -> list:
         return []
 
 
+def _beatport_image_urls(images, fallback: str = "") -> tuple:
+    """Return ``(thumb, cover_image)`` for Beatport image payloads.
+
+    Prefers small/medium for thumb and largest known variant for cover_image.
+    Supports Beatport template URLs containing ``{w}``/``{h}`` placeholders.
+    """
+
+    def _uri(value) -> str:
+        if isinstance(value, dict):
+            out = value.get("uri") or value.get("url") or ""
+            return str(out).strip() if out else ""
+        if isinstance(value, str):
+            return value.strip()
+        return ""
+
+    def _dynamic(uri: str, size: int) -> str:
+        u = str(uri or "").strip()
+        if not u:
+            return ""
+        return (
+            u.replace("{w}", str(size))
+             .replace("{h}", str(size))
+             .replace("{{w}}", str(size))
+             .replace("{{h}}", str(size))
+        )
+
+    thumb = ""
+    cover_image = ""
+    if isinstance(images, dict):
+        small = _uri(images.get("small"))
+        medium = _uri(images.get("medium"))
+        large = _uri(images.get("large"))
+        xl = _uri(images.get("xlarge") or images.get("xl") or images.get("max"))
+        base = _uri(images.get("uri") or images.get("full"))
+        dynamic = _dynamic(_uri(images.get("dynamic") or images.get("template")), 1400)
+        thumb_dynamic = _dynamic(_uri(images.get("dynamic") or images.get("template")), 500)
+
+        thumb = small or medium or thumb_dynamic or base or large or xl or ""
+        cover_image = xl or large or dynamic or base or medium or small or thumb or ""
+    else:
+        raw = _uri(images)
+        thumb = raw or ""
+        cover_image = raw or ""
+
+    if not thumb:
+        thumb = str(fallback or "").strip()
+    if not cover_image:
+        cover_image = str(fallback or "").strip() or thumb
+    return thumb, cover_image
+
+
 # Alternative selectors probed when the primary Bandcamp selector matches nothing.
 _BANDCAMP_ALT_SELECTORS = [
     ("li[class*=result]",   lambda soup: soup.find_all("li", class_=re.compile(r"result"))),
@@ -2518,24 +2569,17 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             label_str = str(label_data) if label_data else ""
                         remixers = track.get("remixers") or []
                         remixer_str = ", ".join(x.get("name", "") for x in remixers if x.get("name"))
-                        # Thumbnail: prefer track image, fall back to release image or URI fields
+                        # Thumbnail/full cover: prefer structured image payload, then URI fallbacks
                         images = track.get("images") or release.get("images") or {}
-                        if isinstance(images, dict):
-                            thumb = (
-                                (images.get("small") or {}).get("uri")
-                                or (images.get("medium") or {}).get("uri")
-                                or images.get("uri")
-                                or ""
-                            )
-                        else:
-                            thumb = track.get("image") or release.get("image") or ""
-                        if not thumb:
-                            thumb = (
-                                track.get("release_image_uri")
-                                or release.get("release_image_uri")
-                                or track.get("image_uri")
-                                or ""
-                            )
+                        fallback_img = (
+                            track.get("release_image_uri")
+                            or release.get("release_image_uri")
+                            or track.get("image_uri")
+                            or track.get("image")
+                            or release.get("image")
+                            or ""
+                        )
+                        thumb, cover_image = _beatport_image_urls(images, fallback_img)
                         if t and slug:
                             _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                             score = _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens, date_q=date_q) + \
@@ -2557,6 +2601,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                             }
                             if thumb:
                                 entry["thumb"] = thumb
+                            if cover_image:
+                                entry["cover_image"] = cover_image
                             results.append(entry)
             except Exception:
                 pass
@@ -2626,22 +2672,14 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                         label_str = str(label_data) if label_data else ""
                     # Thumbnail
                     images = track.get("images") or (track.get("release") or {}).get("images") or {}
-                    if isinstance(images, dict):
-                        thumb = (
-                            (images.get("small") or {}).get("uri")
-                            or (images.get("medium") or {}).get("uri")
-                            or images.get("uri")
-                            or ""
-                        )
-                    else:
-                        thumb = track.get("image") or ""
-                    if not thumb:
-                        thumb = (
-                            track.get("release_image_uri")
-                            or (track.get("release") or {}).get("release_image_uri")
-                            or track.get("image_uri")
-                            or ""
-                        )
+                    fallback_img = (
+                        track.get("release_image_uri")
+                        or (track.get("release") or {}).get("release_image_uri")
+                        or track.get("image_uri")
+                        or track.get("image")
+                        or ""
+                    )
+                    thumb, cover_image = _beatport_image_urls(images, fallback_img)
                     _prox_bonus, _prox_unlocks = _beatport_date_proximity_score(date_q, release_date)
                     score = (
                         _score_result(artist_q, title_q, a, t, year_q, res_year, remix_tokens, date_q=date_q)
@@ -2663,6 +2701,8 @@ def _parse_web_search_results(site: str, search_url: str, html: str,
                     }
                     if thumb:
                         entry["thumb"] = thumb
+                    if cover_image:
+                        entry["cover_image"] = cover_image
                     results.append(entry)
             except Exception:
                 pass
@@ -4150,6 +4190,17 @@ function formatReleasedDateText(value) {{
   const isoDate = text.slice(0, 10);
   return isoDate.length === 10 && text.charAt(10) === "T" ? isoDate : text;
 }}
+function normalizeReleasedToIsoDate(value) {{
+  const text = formatReleasedDateText(value).trim();
+  if(text.length < 10) return "";
+  const isoDate = text.slice(0, 10);
+  const parts = isoDate.split("-");
+  if(parts.length !== 3) return "";
+  if(!isFourDigitYear(parts[0])) return "";
+  if(!isDigitsOnly(parts[1]) || parts[1].length !== 2) return "";
+  if(!isDigitsOnly(parts[2]) || parts[2].length !== 2) return "";
+  return isoDate;
+}}
 function showToast(message, kind="info", ms=2800) {{
   const stack = document.getElementById("toastStack");
   if(!stack) return;
@@ -4897,10 +4948,20 @@ async function applyWebResult(i){{
     if(r.url) window.open(r.url,"_blank","noopener");
     return;
   }}
-  // Prefill BPM and genre from search result if those fields are currently blank
+  // Prefill structured fields from the selected search result before URL parse.
   if(r.bpm && !getField("bpm")) setField("bpm", String(r.bpm));
   if(r.genre && !getField("genre")) setField("genre", r.genre);
   if(r.track_number && !getField("track")) setField("track", String(r.track_number));
+  if(r.label && !getField("publisher")) setField("publisher", r.label);
+  const isoReleaseDate = normalizeReleasedToIsoDate(r.released);
+  if(isoReleaseDate) {{
+    setField("date", isoReleaseDate);
+    const releaseYear = isoReleaseDate.slice(0, 4);
+    if(getField("year") !== releaseYear) setField("year", releaseYear);
+  }}
+  const bestArtUrl = String(r.cover_image || r.thumb || "").trim();
+  if(bestArtUrl && !getField("art_url")) setField("art_url", bestArtUrl);
+  if(bestArtUrl) checkArtUrlDim();
   document.getElementById("purl").value = r.url;
   parseUrl();
 }}
