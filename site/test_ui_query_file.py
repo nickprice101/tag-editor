@@ -124,6 +124,9 @@ def test_ui_home_uses_string_helpers_instead_of_inline_regex_literals():
     assert 'const dateYear = extractLeadingYear(dateVal);' in html
     assert 'if(!trackVal || hasZeroTrackTotal(trackVal)) setField("track", "1/1");' in html
     assert 'if(isDigitsOnly(pos)) setField("track", pos);' in html
+    assert 'function normalizeReleasedToIsoDate(value)' in html
+    assert 'setField("date", isoReleaseDate);' in html
+    assert 'if(getField("year") !== releaseYear) setField("year", releaseYear);' in html
 
 
 def test_ui_home_init_auto_loads_directory_and_query_file():
