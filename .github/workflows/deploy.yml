@@ -1,4 +1,4 @@
-name: Deploy website to StarbuckNAS + restart container
+name: Deploy website to StarbuckHomeLab + restart container
 
 on:
   push:
